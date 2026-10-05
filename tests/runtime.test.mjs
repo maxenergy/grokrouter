@@ -1170,10 +1170,21 @@ test("DeepSeek uses the stateless Responses API and preserves Grok function call
         user("Use the Shell tool to inspect the workspace"),
         {
           role: "assistant",
-          content: "",
-          tool_calls: [{ id: "old-call", type: "function", function: { name: "Read", arguments: "{\"path\":\"README.md\"}" } }],
+          content: [{
+            type: "tool-call",
+            toolCallId: "old-call",
+            toolName: "Read",
+            args: { path: "README.md" },
+          }],
         },
-        { role: "tool", tool_call_id: "old-call", content: "README fixture" },
+        {
+          role: "user",
+          content: [{
+            type: "tool-result",
+            toolCallId: "old-call",
+            result: "README fixture",
+          }],
+        },
       ],
       [{ name: "Shell", description: "Run shell command", inputSchema: { type: "object", properties: { command: { type: "string" } } } }],
       async (url, init) => {
@@ -1209,8 +1220,17 @@ test("DeepSeek uses the stateless Responses API and preserves Grok function call
 test("DeepSeek transcript conversion emits Responses function call pairs", async () => {
   const input = await deepSeekResponseInput([
     user("read it"),
-    { role: "assistant", content: "checking", tool_calls: [{ id: "call-1", type: "function", function: { name: "Read", arguments: "{\"path\":\"x\"}" } }] },
-    { role: "tool", tool_call_id: "call-1", content: "done" },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "checking" },
+        { type: "tool-call", toolCallId: "call-1", toolName: "Read", args: { path: "x" } },
+      ],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool-result", toolCallId: "call-1", result: "done" }],
+    },
   ]);
   assert.ok(input.some((item) => item.type === "message" && item.role === "assistant"));
   assert.deepEqual(input.find((item) => item.type === "function_call"), {
