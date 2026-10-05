@@ -121,7 +121,7 @@ test("installation registers workflows before restarting their gateway and verif
       },
       evaluate:async()=>{events.push('reconnect');return {};},
     });
-    const pending=install('test-app',{providers:['codex'],defaultProvider:'codex',codexModel:'gpt-test',openRouterModel:'vendor/test'});
+    const pending=install('test-app',{providers:['codex'],defaultProvider:'codex',codexModel:'gpt-test',claudeCodeModel:'sonnet',deepSeekModel:'deepseek-flash',openRouterModel:'vendor/test'});
     if(failRegistration) {
       await assert.rejects(pending,/registration rejected/);
       assert.deepEqual(events,['installed','verified']);
