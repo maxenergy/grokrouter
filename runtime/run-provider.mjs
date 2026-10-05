@@ -1891,6 +1891,13 @@ function claudeUsage(message) {
   };
 }
 
+function claudeCodeEffort(value) {
+  if (value === "minimal") return "low";
+  if (value === "xhigh") return "max";
+  if (["low", "medium", "high", "max"].includes(value)) return value;
+  return "high";
+}
+
 async function createClaudeQuery() {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   if (typeof sdk.query !== "function") throw new Error("Claude Agent SDK does not export query()");
@@ -1925,7 +1932,7 @@ export async function runClaudeCode(config, messages, tools, queryFactory = null
       ].join(" "),
       snapshot: false,
     },
-    effort: config.claudeCodeReasoning || "high",
+    effort: claudeCodeEffort(config.claudeCodeReasoning || "high"),
     persistSession: !nativeTextTask,
     env: { ...process.env, IS_SANDBOX: process.env.IS_SANDBOX || "1" },
   };
