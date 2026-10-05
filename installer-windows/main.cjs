@@ -14,6 +14,8 @@ const SUPPORTED_GROK_VERSION = SUPPORTED_GROK_VERSIONS.join(", ");
 let detectedGrokVersion = "0.30.0";
 const CDP_PORT = 19222;
 const CODEX_MODELS = new Set(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+const CLAUDE_CODE_MODELS = new Set(["sonnet", "opus", "haiku"]);
+const DEEPSEEK_MODELS = new Set(["deepseek-flash", "deepseek-v4-pro"]);
 const OPENROUTER_MODELS = new Set([
   "anthropic/claude-sonnet-4.6",
   "openai/gpt-5.6-sol",
@@ -343,13 +345,14 @@ async function evaluate(client, sessionID, expression, timeoutMilliseconds = 30_
   return response;
 }
 
-async function saveOpenRouterKey(key, client, pageSession) {
+async function saveProtectedSecret(name, key, client, pageSession) {
   if (!key) return;
-  log("Saving OPENROUTER_API_KEY through Grok Bot's protected Secrets store…");
+  if (!["OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"].includes(name)) throw new Error("Unsupported protected secret name.");
+  log(`Saving ${name} through Grok Bot's protected Secrets store…`);
   const response = await evaluate(
     client,
     pageSession,
-    `window.desktop.secrets.upsert({OPENROUTER_API_KEY:${JSON.stringify(key)}}).then(()=>({saved:true}))`,
+    `window.desktop.secrets.upsert({${name}:${JSON.stringify(key)}}).then(()=>({saved:true}))`,
   );
   if (response.result?.value?.saved !== true) throw new Error("Grok Bot did not confirm that its protected secret was saved.");
 }
@@ -649,15 +652,33 @@ async function updateNativeWorkflows(client, pageSession, operation = "sync") {
 
 function validatedInstallOptions(raw) {
   const providers = Array.isArray(raw.providers) ? [...new Set(raw.providers)] : [];
-  if (!providers.length || providers.some((item) => item !== "codex" && item !== "openrouter")) throw new Error("Choose Codex SDK, OpenRouter, or both.");
+  const allowedProviders = new Set(["codex", "claude-code", "deepseek", "openrouter"]);
+  if (!providers.length || providers.some((item) => !allowedProviders.has(item))) {
+    throw new Error("Choose at least one supported provider.");
+  }
   if (!providers.includes(raw.defaultProvider)) throw new Error("The default provider must be enabled.");
   if (!CODEX_MODELS.has(raw.codexModel)) throw new Error("Choose a packaged Codex model.");
+  if (!CLAUDE_CODE_MODELS.has(raw.claudeCodeModel)) throw new Error("Choose a packaged Claude Code model.");
+  if (!DEEPSEEK_MODELS.has(raw.deepSeekModel)) throw new Error("Choose a packaged DeepSeek model.");
   if (!OPENROUTER_MODELS.has(raw.openRouterModel)) throw new Error("Choose a packaged OpenRouter model.");
+  const deepSeekKey = typeof raw.deepSeekKey === "string" ? raw.deepSeekKey.trim() : "";
+  if (deepSeekKey && (!deepSeekKey.startsWith("sk-") || deepSeekKey.length < 23 || /\s/.test(deepSeekKey))) {
+    throw new Error("The DeepSeek key does not have the expected shape.");
+  }
   const openRouterKey = typeof raw.openRouterKey === "string" ? raw.openRouterKey.trim() : "";
   if (openRouterKey && (!openRouterKey.startsWith("sk-or-v1-") || openRouterKey.length < 33 || /\s/.test(openRouterKey))) {
     throw new Error("The OpenRouter key does not have the expected shape.");
   }
-  return { defaultProvider: raw.defaultProvider, providers, codexModel: raw.codexModel, openRouterModel: raw.openRouterModel, openRouterKey };
+  return {
+    defaultProvider: raw.defaultProvider,
+    providers,
+    codexModel: raw.codexModel,
+    claudeCodeModel: raw.claudeCodeModel,
+    deepSeekModel: raw.deepSeekModel,
+    deepSeekKey,
+    openRouterModel: raw.openRouterModel,
+    openRouterKey,
+  };
 }
 
 async function installRouter(executable, rawOptions) {
@@ -667,8 +688,12 @@ async function installRouter(executable, rawOptions) {
   const client = new CDPClient(await browserWebSocketURL());
   try {
     const pageSession = await mainPageSession(client);
+    if (options.providers.includes("deepseek")) {
+      if (options.deepSeekKey) await saveProtectedSecret("DEEPSEEK_API_KEY", options.deepSeekKey, client, pageSession);
+      else log("No DeepSeek key entered. Keeping any existing DEEPSEEK_API_KEY in Grok Bot Secrets.");
+    }
     if (options.providers.includes("openrouter")) {
-      if (options.openRouterKey) await saveOpenRouterKey(options.openRouterKey, client, pageSession);
+      if (options.openRouterKey) await saveProtectedSecret("OPENROUTER_API_KEY", options.openRouterKey, client, pageSession);
       else log("No OpenRouter key entered. Keeping any existing OPENROUTER_API_KEY in Grok Bot Secrets.");
     }
     log("Verifying that keyboard input is isolated to the Bot terminal…");
@@ -698,7 +723,7 @@ async function installRouter(executable, rawOptions) {
       "rm -rf /tmp/grokbot-router-installer/payload",
       "mkdir -p /tmp/grokbot-router-installer/payload",
       "tar -xzf /tmp/grokbot-router-installer/payload.tgz -C /tmp/grokbot-router-installer/payload --strip-components=1",
-      `if ROUTER_INSTALL_ATTEMPT=${installAttempt} bash /tmp/grokbot-router-installer/payload/remote/install.sh --no-restart --grok-version ${detectedGrokVersion} --provider ${options.defaultProvider} --providers ${options.providers.join(",")} --codex-model ${options.codexModel} --openrouter-model ${options.openRouterModel}; then clear; printf %s ${installPayload} | base64 -d; else code=$?; printf %s ${failurePayload} | base64 -d; echo $code; fi`,
+      `if ROUTER_INSTALL_ATTEMPT=${installAttempt} bash /tmp/grokbot-router-installer/payload/remote/install.sh --no-restart --grok-version ${detectedGrokVersion} --provider ${options.defaultProvider} --providers ${options.providers.join(",")} --codex-model ${options.codexModel} --claude-code-model ${options.claudeCodeModel} --deepseek-model ${options.deepSeekModel} --openrouter-model ${options.openRouterModel}; then clear; printf %s ${installPayload} | base64 -d; else code=$?; printf %s ${failurePayload} | base64 -d; echo $code; fi`,
     );
     log("Transferring a SHA-256-verified payload into the Bot computer…");
     const installVNC = await typeRemoteCommandsResilient(commands, client, pageSession);
@@ -709,6 +734,8 @@ async function installRouter(executable, rawOptions) {
     await updateNativeWorkflows(client, pageSession);
     await restartInstalledHost(client, pageSession);
     await evaluate(client, pageSession, "window.desktop.forceGatewayReconnect().then(()=>true)").catch(() => {});
+    if (options.defaultProvider === "deepseek") return "Installed with DeepSeek selected. Send /router doctor in Grok Bot to verify the key.";
+    if (options.defaultProvider === "claude-code") return "Installed with Claude Code selected. Click Claude sign-in, then send /router doctor.";
     if (options.defaultProvider === "openrouter") return "Installed with OpenRouter selected. Send /router doctor in Grok Bot.";
     if (options.providers.includes("codex")) return "Installed. Click Codex sign-in, then send /router doctor in Grok Bot.";
     return "Installed. Send /router doctor in Grok Bot to verify the selected model.";
@@ -719,6 +746,7 @@ async function installRouter(executable, rawOptions) {
 
 const REMOTE_ACTIONS = Object.freeze({
   auth: { command: "/home/box/.local/bin/grokbot-router auth codex", sentinel: "Welcome to Codex", message: "Codex sign-in is visible in the Bot terminal. Complete the displayed device flow." },
+  "auth-claude": { command: "/home/box/.local/bin/grokbot-router auth claude-code", sentinel: "Claude", message: "Claude Code sign-in is visible in the Bot terminal. Complete the displayed login flow." },
   doctor: { command: "/home/box/.local/bin/grokbot-router doctor", sentinel: "GROKBOT_ROUTER_DOCTOR_DONE", message: "Router Doctor completed in the Bot terminal." },
   repair: { command: "/home/box/.local/bin/grokbot-router repair --no-restart", sentinel: "GROKBOT_ROUTER_REPAIR_OK", message: "Router repaired. Automatic repair is enabled. Send /provider in Grok Bot." },
   uninstall: { command: "/home/box/.local/bin/grokbot-router uninstall", sentinel: "GROKBOT_ROUTER_UNINSTALL_OK", message: "Restore command sent. Grok Bot will reconnect to its stock host." },
