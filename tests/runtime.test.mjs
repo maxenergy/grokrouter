@@ -1217,6 +1217,31 @@ test("DeepSeek uses the stateless Responses API and preserves Grok function call
   }
 });
 
+test("DeepSeek rejects vision turns on non-vision model before network access", async () => {
+  const previous = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = TEST_DEEPSEEK_KEY;
+  try {
+    await assert.rejects(
+      runDeepSeek(
+        { deepSeekModel: "deepseek-v4-pro" },
+        [{
+          role: "user",
+          content: [
+            { type: "text", text: "Describe this image" },
+            { type: "image", mimeType: "image/png", data: "AA==" },
+          ],
+        }],
+        [],
+        async () => { throw new Error("network request should not run"); },
+      ),
+      /switch this Bot to deepseek-flash for vision turns/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previous;
+  }
+});
+
 test("DeepSeek transcript conversion emits Responses function call pairs", async () => {
   const input = await deepSeekResponseInput([
     user("read it"),
