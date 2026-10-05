@@ -1249,7 +1249,7 @@ test("Claude Code resumes its Agent SDK session and can request one outer Grok t
     {
       claudeCodeThreadId: "claude-session-existing",
       claudeCodeModel: "sonnet",
-      claudeCodeReasoning: "high",
+      claudeCodeReasoning: "xhigh",
       workingDirectory: "/workspace",
     },
     [user("Take a screenshot with the outer Grok Computer tool")],
@@ -1260,6 +1260,7 @@ test("Claude Code resumes its Agent SDK session and can request one outer Grok t
   assert.equal(calls[0].options.resume, "claude-session-existing");
   assert.equal(calls[0].options.model, "sonnet");
   assert.equal(calls[0].options.cwd, "/workspace");
+  assert.equal(calls[0].options.effort, "max");
   assert.ok(calls[0].options.allowedTools.includes("Bash"));
   assert.match(calls[0].prompt, /active provider is claude-code/);
   assert.equal(result.threadId, "claude-session-next");
