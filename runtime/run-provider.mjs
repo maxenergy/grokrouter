@@ -1511,6 +1511,11 @@ export async function runDeepSeek(config, messages, tools, fetchImpl = fetch) {
   const forcedTool = explicitlyNamedOfferedTool ?? subagentOrchestrationTool;
   const requiresTool = explicitToolRequest || Boolean(subagentOrchestrationTool);
   const input = await deepSeekResponseInput(messages);
+  const hasImageInput = input.some((item) => Array.isArray(item?.content)
+    && item.content.some((part) => part?.type === "input_image"));
+  if (hasImageInput && model !== "deepseek-flash") {
+    throw new Error(`DeepSeek model ${model} does not support image input through this Responses adapter; switch this Bot to deepseek-flash for vision turns`);
+  }
   const instructions = [
     "You are the primary reasoning engine inside Grok Bot through GrokRouter.",
     `The active provider is DeepSeek and the active model is ${model}.`,
