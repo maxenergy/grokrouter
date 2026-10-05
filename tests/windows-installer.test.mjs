@@ -162,7 +162,7 @@ test("workflow evaluation survives slow readiness while normal diagnostic calls 
     }
   }
   const classSource = main.slice(main.indexOf("class CDPClient {"), main.indexOf("function knownGrokPaths()"));
-  const evaluateSource = main.slice(main.indexOf("async function evaluate("), main.indexOf("async function saveOpenRouterKey("));
+  const evaluateSource = main.slice(main.indexOf("async function evaluate("), main.indexOf("async function saveProtectedSecret("));
   const {CDPClient, evaluate} = runInNewContext(`${classSource}\n${evaluateSource}\n({CDPClient,evaluate})`, {
     WebSocket:SlowSocket, setTimeout:schedule, clearTimeout:(id) => timers.delete(id),
   });
@@ -182,12 +182,17 @@ test("workflow evaluation survives slow readiness while normal diagnostic calls 
   assert.match(main, /nativeWorkflowExpression\(operation\), 240_000/);
 });
 
-test("Windows renderer is isolated from Node and never stores the OpenRouter key", () => {
+test("Windows renderer is isolated from Node and never stores provider API keys", () => {
   assert.match(main, /contextIsolation: true/);
   assert.match(main, /nodeIntegration: false/);
   assert.match(main, /sandbox: true/);
   assert.match(preload, /contextBridge\.exposeInMainWorld/);
   assert.match(renderer, /elements\.openRouterKey\.value = ""/);
+  assert.match(renderer, /elements\.deepSeekKey\.value = ""/);
+  assert.match(main, /DEEPSEEK_API_KEY/);
+  assert.match(main, /auth-claude/);
+  assert.match(html, /Claude Code/);
+  assert.match(html, /DeepSeek/);
   assert.doesNotMatch(renderer, /localStorage|sessionStorage/);
   assert.match(html, /type="password"/);
   assert.match(html, /Content-Security-Policy/);
