@@ -657,26 +657,37 @@ function validatedInstallOptions(raw) {
     throw new Error("Choose at least one supported provider.");
   }
   if (!providers.includes(raw.defaultProvider)) throw new Error("The default provider must be enabled.");
-  if (!CODEX_MODELS.has(raw.codexModel)) throw new Error("Choose a packaged Codex model.");
-  if (!CLAUDE_CODE_MODELS.has(raw.claudeCodeModel)) throw new Error("Choose a packaged Claude Code model.");
-  if (!DEEPSEEK_MODELS.has(raw.deepSeekModel)) throw new Error("Choose a packaged DeepSeek model.");
-  if (!OPENROUTER_MODELS.has(raw.openRouterModel)) throw new Error("Choose a packaged OpenRouter model.");
+
+  const codexModel = typeof raw.codexModel === "string" && raw.codexModel ? raw.codexModel : "gpt-5.6-sol";
+  const claudeCodeModel = typeof raw.claudeCodeModel === "string" && raw.claudeCodeModel ? raw.claudeCodeModel : "sonnet";
+  const deepSeekModel = typeof raw.deepSeekModel === "string" && raw.deepSeekModel ? raw.deepSeekModel : "deepseek-flash";
+  const openRouterModel = typeof raw.openRouterModel === "string" && raw.openRouterModel
+    ? raw.openRouterModel
+    : "anthropic/claude-sonnet-4.6";
+
+  if (providers.includes("codex") && !CODEX_MODELS.has(codexModel)) throw new Error("Choose a packaged Codex model.");
+  if (providers.includes("claude-code") && !CLAUDE_CODE_MODELS.has(claudeCodeModel)) throw new Error("Choose a packaged Claude Code model.");
+  if (providers.includes("deepseek") && !DEEPSEEK_MODELS.has(deepSeekModel)) throw new Error("Choose a packaged DeepSeek model.");
+  if (providers.includes("openrouter") && !OPENROUTER_MODELS.has(openRouterModel)) throw new Error("Choose a packaged OpenRouter model.");
+
   const deepSeekKey = typeof raw.deepSeekKey === "string" ? raw.deepSeekKey.trim() : "";
-  if (deepSeekKey && (!deepSeekKey.startsWith("sk-") || deepSeekKey.length < 23 || /\s/.test(deepSeekKey))) {
+  if (providers.includes("deepseek") && deepSeekKey
+      && (!deepSeekKey.startsWith("sk-") || deepSeekKey.length < 23 || /\s/.test(deepSeekKey))) {
     throw new Error("The DeepSeek key does not have the expected shape.");
   }
   const openRouterKey = typeof raw.openRouterKey === "string" ? raw.openRouterKey.trim() : "";
-  if (openRouterKey && (!openRouterKey.startsWith("sk-or-v1-") || openRouterKey.length < 33 || /\s/.test(openRouterKey))) {
+  if (providers.includes("openrouter") && openRouterKey
+      && (!openRouterKey.startsWith("sk-or-v1-") || openRouterKey.length < 33 || /\s/.test(openRouterKey))) {
     throw new Error("The OpenRouter key does not have the expected shape.");
   }
   return {
     defaultProvider: raw.defaultProvider,
     providers,
-    codexModel: raw.codexModel,
-    claudeCodeModel: raw.claudeCodeModel,
-    deepSeekModel: raw.deepSeekModel,
+    codexModel,
+    claudeCodeModel,
+    deepSeekModel,
     deepSeekKey,
-    openRouterModel: raw.openRouterModel,
+    openRouterModel,
     openRouterKey,
   };
 }
