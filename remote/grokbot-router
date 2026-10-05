@@ -15,6 +15,7 @@ PATCHER="$INSTALL_ROOT/patch/router_patch.py"
 HOST_REGISTRY_TOOL="$INSTALL_ROOT/bin/host-registry"
 GROK_VERSION="$("$HOST_REGISTRY_TOOL" version)"
 CODEX_CLI="$INSTALL_ROOT/node_modules/.bin/codex"
+CLAUDE_CLI="$INSTALL_ROOT/node_modules/.bin/claude"
 GROK_SKILLS_ROOT="${ROUTER_GROK_SKILLS_ROOT:-/home/box/.grok/skills}"
 PATCH_ARGS=(
   --host "${ROUTER_PATCH_HOST:-/home/box/sand-host/host-main.cjs}"
@@ -69,8 +70,12 @@ usage() {
     "  doctor                         Verify runtime, host patch, and credentials" \
     "  repair [--no-restart]           Reapply the exact-gated host patch" \
     "  auth codex                     Start Codex device sign-in" \
-    "  provider codex|openrouter      Change the default for new Bot threads" \
+    "  auth claude-code               Start Claude Code login" \
+    "  provider codex|claude-code|deepseek|openrouter" \
+    "                                 Change the default for new Bot threads" \
     "  model codex MODEL              Change the default Codex model" \
+    "  model claude-code MODEL        Change the default Claude Code model" \
+    "  model deepseek MODEL           Change the default DeepSeek model" \
     "  model openrouter vendor/model  Change the default OpenRouter model" \
     "  enable | disable               Enable or bypass the router" \
     "  restart                        Restart Grok Bot's host process" \
@@ -196,6 +201,8 @@ print(f"Automatic repair: {config.get('autoRepair') is True}")
 print(f"Default provider: {config.get('provider', 'codex')}")
 print(f"Providers: {', '.join(config.get('providers', []))}")
 print(f"Codex model: {config.get('codexModel', 'not configured')}")
+print(f"Claude Code model: {config.get('claudeCodeModel', 'not configured')}")
+print(f"DeepSeek model: {config.get('deepSeekModel', 'not configured')}")
 print(f"OpenRouter model: {config.get('openRouterModel', 'not configured')}")
 PY
     ;;
@@ -219,14 +226,56 @@ PY
       fi
     fi
     printf '%s\n' "$doctor_output"
-    printf 'Codex\n'
-    if [[ -x "$CODEX_CLI" ]]; then
-      "$CODEX_CLI" login status 2>&1 | sed -E 's/([A-Za-z0-9._%+-]+)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[account]/g' || true
-    else
-      printf '  CLI missing\n'
+    enabled_providers="$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1])).get("providers", [])))' "$CONFIG_PATH")"
+    if [[ ",$enabled_providers," == *,codex,* ]]; then
+      printf 'Codex\n'
+      if [[ -x "$CODEX_CLI" ]]; then
+        "$CODEX_CLI" login status 2>&1 | sed -E 's/([A-Za-z0-9._%+-]+)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[account]/g' || true
+      else
+        printf '  CLI missing\n'
+        doctor_status=1
+      fi
     fi
-    printf 'OpenRouter\n'
-    python3 - <<'PY'
+    if [[ ",$enabled_providers," == *,claude-code,* ]]; then
+      printf 'Claude Code\n'
+      if [[ -x "$CLAUDE_CLI" ]]; then
+        "$CLAUDE_CLI" auth status --text 2>&1 \
+          | sed -E 's/([A-Za-z0-9._%+-]+)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/[account]/g' || true
+      else
+        printf '  CLI missing\n'
+        doctor_status=1
+      fi
+      if [[ -f "$INSTALL_ROOT/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" ]]; then
+        printf '  Agent SDK: installed\n'
+      else
+        printf '  Agent SDK: missing\n'
+        doctor_status=1
+      fi
+    fi
+    if [[ ",$enabled_providers," == *,deepseek,* ]]; then
+      printf 'DeepSeek\n'
+      python3 - <<'PY'
+import json
+from pathlib import Path
+
+path = Path('/home/box/sand-data/box-secrets.json')
+try:
+    data = json.loads(path.read_text())
+    value = data.get('secrets', {}).get('DEEPSEEK_API_KEY', '').strip()
+except Exception:
+    value = ''
+valid = value.startswith('sk-') and len(value) >= 23 and not any(ch.isspace() for ch in value)
+if valid:
+    print("  Credential: configured and valid shape")
+elif value:
+    print("  Credential: present but invalid shape")
+else:
+    print("  Credential: not configured")
+PY
+    fi
+    if [[ ",$enabled_providers," == *,openrouter,* ]]; then
+      printf 'OpenRouter\n'
+      python3 - <<'PY'
 import json
 from pathlib import Path
 
@@ -244,6 +293,7 @@ elif value:
 else:
     print("  Credential: not configured")
 PY
+    fi
     printf 'Native commands\n'
     printf '  Registration is managed per Bot by the GrokRouter desktop installer.\n'
     printf '  Run Repair in GrokRouter to sync Bots or channels created after installation.\n'
@@ -254,21 +304,42 @@ PY
     repair_host "${2:-}"
     ;;
   auth)
-    if [[ "${2:-}" != "codex" ]]; then
-      printf 'ERROR: supported auth command is: grokbot-router auth codex\n' >&2
-      exit 2
-    fi
-    if [[ ! -x "$CODEX_CLI" ]]; then
-      printf 'ERROR: Codex CLI is missing; reinstall the router\n' >&2
-      exit 1
-    fi
-    exec "$CODEX_CLI" login --device-auth
+    auth_provider="${2:-}"
+    case "$auth_provider" in
+      codex)
+        if [[ ! -x "$CODEX_CLI" ]]; then
+          printf 'ERROR: Codex CLI is missing; reinstall the router\n' >&2
+          exit 1
+        fi
+        exec "$CODEX_CLI" login --device-auth
+        ;;
+      claude-code)
+        if [[ ! -x "$CLAUDE_CLI" ]]; then
+          printf 'ERROR: Claude Code CLI is missing; reinstall with claude-code enabled\n' >&2
+          exit 1
+        fi
+        exec "$CLAUDE_CLI" auth login
+        ;;
+      *)
+        printf 'ERROR: supported auth providers are codex and claude-code. DeepSeek uses DEEPSEEK_API_KEY in Grok Bot Secrets.\n' >&2
+        exit 2
+        ;;
+    esac
     ;;
   provider)
     require_config
     provider="${2:-}"
-    if [[ "$provider" != "codex" && "$provider" != "openrouter" ]]; then
-      printf 'ERROR: provider must be codex or openrouter\n' >&2
+    if [[ "$provider" != "codex" && "$provider" != "claude-code" && "$provider" != "deepseek" && "$provider" != "openrouter" ]]; then
+      printf 'ERROR: provider must be codex, claude-code, deepseek, or openrouter\n' >&2
+      exit 2
+    fi
+    if ! python3 - "$CONFIG_PATH" "$provider" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))
+raise SystemExit(0 if sys.argv[2] in config.get("providers", []) else 1)
+PY
+    then
+      printf 'ERROR: provider %s is not enabled in provider.json\n' "$provider" >&2
       exit 2
     fi
     update_config provider "$provider"
@@ -285,6 +356,10 @@ PY
     fi
     if [[ "$provider" == "codex" ]]; then
       update_config codexModel "$model"
+    elif [[ "$provider" == "claude-code" ]]; then
+      update_config claudeCodeModel "$model"
+    elif [[ "$provider" == "deepseek" ]]; then
+      update_config deepSeekModel "$model"
     elif [[ "$provider" == "openrouter" ]]; then
       if [[ ! "$model" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:+-]+$ ]]; then
         printf 'ERROR: OpenRouter models use vendor/model format\n' >&2
@@ -292,7 +367,7 @@ PY
       fi
       update_config openRouterModel "$model"
     else
-      printf 'ERROR: provider must be codex or openrouter\n' >&2
+      printf 'ERROR: provider must be codex, claude-code, deepseek, or openrouter\n' >&2
       exit 2
     fi
     printf '%s default model updated to %s\n' "$provider" "$model"
