@@ -1,10 +1,12 @@
 <p align="center"><img src="installer/Assets/grokbot-router-mascot-1024.png" width="176" alt="GrokRouter"></p>
 <h1 align="center">GrokRouter</h1>
-<p align="center"><strong>Choose the model for each Grok Bot.</strong><br>Use Codex SDK or OpenRouter from Grok Bot's existing chat.</p>
+<p align="center"><strong>Choose the model for each Grok Bot.</strong><br>Use Codex SDK, Claude Code, DeepSeek, or optional OpenRouter compatibility from Grok Bot's existing chat.</p>
 
 GrokRouter is an experimental, unofficial, reversible model router. Each Bot remembers its own provider and model. Grok Bot continues to own conversations, files, the computer, permissions, and any outer tools it supplies to the routed model. Native maintenance sessions such as memory synthesis keep Grok's original inference backend.
 
 > **Source prerelease: beta.47.** Verified on official Grok Bot 0.30.0 and 0.36.0 with exact reviewed host fingerprints. [Release notes and source](https://github.com/promptadvisers/grokrouter/releases/tag/source-v0.1.0-beta.47) · [Dated verification](docs/TEST-MATRIX.md).
+
+> **Development-branch provider expansion:** this fork adds first-class `claude-code` and `deepseek` providers while retaining Codex and optional OpenRouter compatibility. The beta.47 live-verification claims below apply only to the original Codex/OpenRouter release artifact. Claude Code and DeepSeek are **implementation-complete but pending CI and fresh-Bot live acceptance**; do not treat them as production-verified yet.
 
 ## Compatibility
 
@@ -14,7 +16,9 @@ GrokRouter is an experimental, unofficial, reversible model router. Each Bot rem
 | macOS | Apple silicon, macOS 12+, Apple Command Line Tools |
 | Windows x64 / Arm64 | Source preview; CI packaging is separate from native installation verification |
 | Codex SDK | Sign in with your existing Codex account in the Bot computer |
-| OpenRouter | Your OpenRouter API key; provider usage is billed by OpenRouter |
+| Claude Code (development branch) | Claude Agent SDK session plus the Claude Code CLI sign-in flow; live Grok acceptance pending |
+| DeepSeek (development branch) | Native DeepSeek Responses API using `DEEPSEEK_API_KEY`; stateless provider replay; live Grok acceptance pending |
+| OpenRouter | Optional compatibility provider using your OpenRouter API key |
 | Computer and sub-agents | Available only when Grok offers the necessary schemas; see the [verification matrix](docs/TEST-MATRIX.md) for provider-specific evidence |
 
 **Already updated Grok Bot?** Beta.47 supports official 0.36.0 through a separate desktop gate and signed host registry. **0.44.0 and other unlisted versions are unsupported.** The desktop version and cloud host are separate checks: a supported app can still receive an unknown host, which the installer leaves untouched. See [compatibility reports](https://github.com/promptadvisers/grokrouter/issues?q=is%3Aissue+is%3Aopen+label%3Acompatibility).
@@ -29,8 +33,8 @@ GrokRouter is an experimental, unofficial, reversible model router. Each Bot rem
    ```
 
    This downloads tagged source, builds and signs the app locally, installs it at `~/Applications/GrokRouter.app`, and opens it. It does not need `sudo`. If Apple Command Line Tools are missing, finish Apple's installation and repeat the command.
-3. Choose **Codex SDK**, **OpenRouter**, or both. Choose the default provider for new Bots. If using OpenRouter, enter its complete key in the installer; the installer hands it to Grok's protected Secrets store and clears the field.
-4. Click **Install Router**. Wait for a successful installation receipt. If using Codex, choose **Codex sign-in** and complete the sign-in shown in the Bot terminal.
+3. On this development branch, choose any enabled combination of **Codex SDK**, **Claude Code**, **DeepSeek**, and optional **OpenRouter**. Choose the default provider for new Bots. DeepSeek and OpenRouter keys are handed directly to Grok's protected Secrets store and cleared from the installer field.
+4. Click **Install Router**. Wait for a successful installation receipt. If using Codex, choose **Codex sign-in**. If using Claude Code, choose **Claude sign-in**. Complete the login flow shown in the Bot terminal.
 5. Create a **brand-new Bot after installation**. Type these commands manually into its normal chat, one at a time:
 
    ```text
@@ -50,7 +54,9 @@ The ZIP alternative is the release's **Source code (zip) → Install GrokRouter.
 | --- | --- |
 | `/provider` | Show this Bot's provider and model |
 | `/provider codex` | Switch this Bot to Codex SDK |
-| `/provider openrouter` | Switch this Bot to OpenRouter |
+| `/provider claude-code` | Switch this Bot to Claude Code |
+| `/provider deepseek` | Switch this Bot to DeepSeek |
+| `/provider openrouter` | Switch this Bot to optional OpenRouter compatibility |
 | `/models` | List configured models and switching instructions |
 | `/model vendor/model` or `/models vendor/model` | Select a model explicitly |
 | A listed `vendor/model` ID by itself | Select that model |
@@ -89,7 +95,7 @@ GrokRouter requires an exact reviewed **SHA-256 and byte count**, then checks ev
 
 Router upgrades reconstruct the expected existing adapter from a trusted original. A marker string alone is insufficient. Doctor verifies the live adapter against that reconstruction and reports stock-backup health separately.
 
-The selected model can request only the outer tools Grok supplies for that turn. Grok still applies its permissions and performs those actions. A screenshot or sub-agent bridge in the source is not proof that every provider has passed those workflows. Codex Sol and OpenRouter Claude passed real Shell, Read, Screenshot, and completed-child tests on both supported versions. Other models do not inherit those results. Exact receipts and provider limitations are in [TEST-MATRIX.md](docs/TEST-MATRIX.md).
+The selected model can request only the outer tools Grok supplies for that turn. Grok still applies its permissions and performs those actions. A screenshot or sub-agent bridge in the source is not proof that every provider has passed those workflows. Codex Sol and OpenRouter Claude passed the beta.47 real Shell, Read, Screenshot, and completed-child tests on both supported versions. **Claude Code and DeepSeek in this development branch do not inherit those results and still require fresh live capability acceptance.** Exact receipts and provider limitations are in [TEST-MATRIX.md](docs/TEST-MATRIX.md).
 
 Provider credentials stay out of repository files, Bot state, and diagnostic logs. Routed conversation content is sent to the provider you choose. Read [SECURITY.md](SECURITY.md) and [HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) for the data boundary.
 

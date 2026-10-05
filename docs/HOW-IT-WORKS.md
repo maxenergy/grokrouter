@@ -12,8 +12,8 @@ YouTube-ready files:
 ## Read the diagram in 45 seconds
 
 1. **You type in Grok Bot.** The app, Bot, conversation history, files and computer stay where they already are.
-2. **The router checks that Bot's saved choice.** One Bot can use Claude through OpenRouter, another can use a Codex model, and changing one does not change the others.
-3. **The chosen AI handles the turn.** The router sends the cleaned conversation and the tools Grok made available for that turn to Codex SDK or OpenRouter.
+2. **The router checks that Bot's saved choice.** One Bot can use Claude Code, another can use Codex, another can use DeepSeek, and changing one does not change the others.
+3. **The chosen AI handles the turn.** The router sends the cleaned conversation and the tools Grok made available for that turn to the selected provider adapter. Codex and Claude Code keep provider-native sessions; DeepSeek uses the stateless Responses API and receives the required transcript/tool-result history again on each turn.
 4. **The answer returns to the same chat.** You do not move to another app or learn another interface.
 5. **If an action is needed, Grok still does it.** The selected AI can request a computer, file, browser or orchestration tool only when Grok supplied that tool for the turn. Grok's permission layer still applies. The result goes back to the same selected AI, which finishes the answer.
 6. **Recovery is built in.** Installation verifies that the Grok host is genuinely stock, saves the untouched original, and can restore the stock inference path later.
@@ -39,7 +39,7 @@ If the app version, source anchors, payload checksum, registry signature, Termin
 1. Grok creates the same conversation session it normally would.
 2. The injected executor starts the isolated router runtime and supplies the transcript, stable Bot identifiers and any tools Grok offered for that turn.
 3. The runtime loads this Bot's provider and model from its own state file.
-4. Codex SDK resumes that Bot's Codex thread, or OpenRouter receives an OpenAI-compatible request for the selected model.
+4. Codex SDK resumes that Bot's Codex thread; Claude Agent SDK resumes that Bot's Claude Code session; DeepSeek receives a native Responses request with the replayed controlled transcript; OpenRouter remains an optional compatibility path.
 5. The provider returns text.
 6. The runtime hands that text to Grok's normal delivery mechanism, so it appears once in the original conversation.
 
@@ -52,7 +52,7 @@ Commands such as `/models`, `/provider`, `/doctor`, and `/router doctor` are han
 ### A tool turn
 
 1. Grok may include tool definitions with the turn.
-2. The router translates those exact schemas into the format expected by Codex SDK or OpenRouter.
+2. The router translates those exact schemas into the format expected by Codex SDK, Claude Code's adapter, DeepSeek Responses, or the optional OpenRouter bridge.
 3. The selected AI may return a structured request for one of those tools.
 4. Grok performs the action and applies its normal permission behavior.
 5. The matching result returns to the same provider thread.
@@ -80,7 +80,7 @@ This is why the acceptance test always creates two new Bots: the first is switch
 
 ## Credentials and data boundaries
 
-- The OpenRouter key is saved through Grok Bot's protected Secrets store and loaded only when a request is made.
+- DeepSeek and OpenRouter API keys are saved through Grok Bot's protected Secrets store and loaded only when a request is made. Claude Code and Codex use their provider-native login flows inside the Bot computer.
 - Provider credentials are not written to this repository, per-Bot state files or audit logs.
 - The chosen provider necessarily receives the conversation content and media needed to answer that routed turn.
 - Grok remains the executor for outer computer, file, browser and orchestration tools. A provider receives their results only when that tool path actually runs.

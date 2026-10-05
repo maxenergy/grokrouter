@@ -14,7 +14,7 @@
         <div>
           <div class="eyebrow">GROK BOT 0.30 / 0.36 <span>•</span> WINDOWS</div>
           <h1>Bring your own model.</h1>
-          <p>Keep Grok Bot’s interface, computer, files and tools. Route each Bot through Codex or OpenRouter, then switch models from the normal chat composer.</p>
+          <p>Keep Grok Bot’s interface, computer, files and tools. Route each Bot through Codex, Claude Code, DeepSeek, or optional OpenRouter, then switch models from the normal chat composer.</p>
         </div>
       </header>
 
@@ -25,13 +25,21 @@
         </div>
         <div class="checks">
           <label><input id="codexEnabled" type="checkbox" checked /> <span>Codex SDK</span></label>
-          <label><input id="openRouterEnabled" type="checkbox" checked /> <span>OpenRouter</span></label>
+          <label><input id="claudeCodeEnabled" type="checkbox" checked /> <span>Claude Code</span></label>
+          <label><input id="deepSeekEnabled" type="checkbox" checked /> <span>DeepSeek</span></label>
+          <label><input id="openRouterEnabled" type="checkbox" /> <span>OpenRouter (compat)</span></label>
         </div>
         <div class="form-grid">
           <label for="defaultProvider">Default provider</label>
-          <select id="defaultProvider"><option value="codex">Codex SDK</option><option value="openrouter">OpenRouter</option></select>
+          <select id="defaultProvider"><option value="codex">Codex SDK</option><option value="claude-code">Claude Code</option><option value="deepseek">DeepSeek</option></select>
           <label for="codexModel">Codex model</label>
           <select id="codexModel"><option>gpt-5.6-sol</option><option>gpt-5.6-terra</option><option>gpt-5.6-luna</option></select>
+          <label for="claudeCodeModel">Claude Code model</label>
+          <select id="claudeCodeModel"><option>sonnet</option><option>opus</option><option>haiku</option></select>
+          <label for="deepSeekModel">DeepSeek model</label>
+          <select id="deepSeekModel"><option>deepseek-flash</option><option>deepseek-v4-pro</option></select>
+          <label for="deepSeekKey">DeepSeek key</label>
+          <input id="deepSeekKey" type="password" autocomplete="off" spellcheck="false" placeholder="Stored only in Grok Bot Secrets" />
           <label for="openRouterModel">OpenRouter model</label>
           <select id="openRouterModel">
             <option>anthropic/claude-sonnet-4.6</option><option>openai/gpt-5.6-sol</option>
@@ -55,6 +63,7 @@
         <div class="tools-label">TOOLS</div>
         <div class="tools">
           <button data-action="auth">Codex sign-in</button>
+          <button data-action="auth-claude">Claude sign-in</button>
           <button data-action="doctor">Check health</button>
           <button data-action="repair">Repair</button>
           <button data-action="uninstall">Restore stock</button>

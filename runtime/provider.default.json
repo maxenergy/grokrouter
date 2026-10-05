@@ -4,6 +4,8 @@
   "provider": "codex",
   "providers": [
     "codex",
+    "claude-code",
+    "deepseek",
     "openrouter"
   ],
   "codexModel": "gpt-5.6-sol",
@@ -33,5 +35,21 @@
   "nodePath": "/usr/bin/node",
   "statePath": "/home/box/sand-data/grokbot-router/conversation-states.json",
   "auditPath": "/home/box/sand-data/grokbot-router/audit.jsonl",
-  "openRouterBaseUrl": "https://openrouter.ai/api/v1"
+  "openRouterBaseUrl": "https://openrouter.ai/api/v1",
+  "claudeCodeModel": "sonnet",
+  "claudeCodeReasoning": "high",
+  "claudeCodeModels": [
+    "sonnet",
+    "opus",
+    "haiku"
+  ],
+  "claudeCodePermissionMode": "bypassPermissions",
+  "claudeCodeMaxTurns": 24,
+  "deepSeekModel": "deepseek-flash",
+  "deepSeekReasoning": "high",
+  "deepSeekModels": [
+    "deepseek-flash",
+    "deepseek-v4-pro"
+  ],
+  "deepSeekBaseUrl": "https://api.deepseek.com"
 }

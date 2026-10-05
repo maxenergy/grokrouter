@@ -1178,6 +1178,40 @@ async function persistedOpenRouterKey(config) {
   throw new Error("OpenRouter needs OPENROUTER_API_KEY in Grok Bot's Secrets store");
 }
 
+function validDeepSeekKey(value) {
+  return /^sk-[A-Za-z0-9_-]{20,}$/.test(value);
+}
+
+async function persistedDeepSeekKey(config) {
+  const inherited = process.env.DEEPSEEK_API_KEY?.trim();
+  if (inherited) {
+    if (!validDeepSeekKey(inherited)) {
+      throw new Error("DEEPSEEK_API_KEY is present but does not look like a valid DeepSeek key");
+    }
+    return inherited;
+  }
+  const candidates = [
+    config.deepSeekSecretsPath,
+    "/home/box/sand-data/box-secrets.json",
+  ].filter(Boolean);
+  for (const pathname of candidates) {
+    let parsed;
+    try {
+      parsed = JSON.parse(await readFile(pathname, "utf8"));
+    } catch {
+      continue;
+    }
+    const value = parsed?.secrets?.DEEPSEEK_API_KEY?.trim();
+    if (value) {
+      if (!validDeepSeekKey(value)) {
+        throw new Error("DEEPSEEK_API_KEY is present but does not look like a valid DeepSeek key");
+      }
+      return value;
+    }
+  }
+  throw new Error("DeepSeek needs DEEPSEEK_API_KEY in Grok Bot's Secrets store");
+}
+
 function isLiteralTextOnlyRequest(text) {
   // Formatting the result of a task does not make its prerequisite work text-only.
   // Only unambiguous standalone literal requests may remove the offered tools.
@@ -1353,6 +1387,216 @@ export async function runOpenRouter(config, messages, tools, fetchImpl = fetch) 
   };
 }
 
+function deepSeekMessageContent(content, assistant = false) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) {
+    const text = collectText(content).trim();
+    return text || "";
+  }
+  const parts = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "text" && typeof part.text === "string") {
+      parts.push({ type: assistant ? "output_text" : "input_text", text: part.text });
+      continue;
+    }
+    if (!assistant && part.type === "image_url" && typeof part.image_url?.url === "string") {
+      parts.push({ type: "input_image", image_url: part.image_url.url, detail: "auto" });
+    }
+  }
+  return parts.length ? parts : "";
+}
+
+export async function deepSeekResponseInput(messages) {
+  const converted = await openRouterMessages(messages);
+  const input = [];
+  for (const message of converted) {
+    if (message?.role === "tool") {
+      input.push({
+        type: "function_call_output",
+        call_id: message.tool_call_id,
+        output: typeof message.content === "string" ? message.content : jsonString(message.content),
+      });
+      continue;
+    }
+    if (message?.role === "assistant") {
+      const content = deepSeekMessageContent(message.content, true);
+      if ((typeof content === "string" && content) || (Array.isArray(content) && content.length)) {
+        input.push({ type: "message", role: "assistant", content });
+      }
+      for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+        const callId = typeof call?.id === "string" && call.id ? call.id : `deepseek-history-${randomUUID()}`;
+        const name = typeof call?.function?.name === "string" ? call.function.name : "";
+        if (!name) continue;
+        input.push({
+          type: "function_call",
+          call_id: callId,
+          name,
+          arguments: typeof call.function.arguments === "string"
+            ? call.function.arguments
+            : jsonString(call.function.arguments || {}),
+        });
+      }
+      continue;
+    }
+    if (["system", "developer", "user"].includes(message?.role)) {
+      const content = deepSeekMessageContent(message.content, false);
+      if ((typeof content === "string" && content) || (Array.isArray(content) && content.length)) {
+        input.push({ type: "message", role: message.role, content });
+      }
+    }
+  }
+  if (!input.length) input.push({ type: "message", role: "user", content: "Continue the Grok Bot conversation." });
+  return input;
+}
+
+function parsedDeepSeekResponse(payload) {
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  const text = output.flatMap((item) => {
+    if (item?.type !== "message" || !Array.isArray(item.content)) return [];
+    return item.content
+      .filter((part) => part?.type === "output_text" && typeof part.text === "string")
+      .map((part) => part.text);
+  }).join("\n").trim();
+  const toolCalls = output.flatMap((item) => {
+    if (item?.type !== "function_call" || typeof item.name !== "string" || !item.name) return [];
+    let args = {};
+    try {
+      args = typeof item.arguments === "string" ? JSON.parse(item.arguments || "{}") : (item.arguments || {});
+    } catch {
+      args = { __raw_arguments: String(item.arguments || "") };
+    }
+    return [{
+      toolCallId: typeof item.call_id === "string" && item.call_id
+        ? item.call_id
+        : `deepseek-grok-tool-${randomUUID()}`,
+      toolName: item.name,
+      args,
+    }];
+  });
+  return { text, toolCalls };
+}
+
+function deepSeekReasoningEffort(value) {
+  if (value === "minimal") return "low";
+  if (value === "xhigh" || value === "medium") return "high";
+  if (["none", "low", "high", "max"].includes(value)) return value;
+  return "high";
+}
+
+export async function runDeepSeek(config, messages, tools, fetchImpl = fetch) {
+  const apiKey = await persistedDeepSeekKey(config);
+  const model = config.deepSeekModel || "deepseek-flash";
+  const visibleUserText = latestUserText(messages);
+  const directTextOnly = isLiteralTextOnlyRequest(visibleUserText);
+  const automaticGreeting = isAutomaticGreeting(messages);
+  const currentUserIndex = latestUserIndex(messages);
+  const currentTurnHasToolResult = currentUserIndex >= 0
+    && messages.slice(currentUserIndex + 1).some((message) => toolResultCallIds(message).size > 0);
+  const normalizedTools = normalizeTools(tools)
+    .filter((tool) => /^[A-Za-z0-9_-]{1,128}$/.test(tool.name));
+  const offeredTools = config.nativeTextTask || directTextOnly || automaticGreeting ? [] : normalizedTools;
+  const explicitToolRequest = offeredTools.length > 0
+    && !currentTurnHasToolResult
+    && /\b(?:use|call|invoke)\b[\s\S]{0,100}\btool\b/i.test(visibleUserText);
+  const explicitlyNamedOfferedTool = explicitToolRequest
+    ? offeredTools.find((tool) => textExplicitlyNamesTool(visibleUserText, tool.name))
+    : null;
+  const subagentRequest = !currentTurnHasToolResult
+    && /\b(?:sub[ -]?agent|delegate|delegation|background agent|parallel agent)\b/i.test(visibleUserText);
+  const subagentOrchestrationTool = subagentRequest
+    ? offeredTools.find((tool) => /(?:sub.?agent|delegate|spawn.*agent)/i.test(tool.name))
+      ?? offeredTools.find((tool) => tool.name.toLowerCase() === "getdynamictools")
+    : null;
+  const forcedTool = explicitlyNamedOfferedTool ?? subagentOrchestrationTool;
+  const requiresTool = explicitToolRequest || Boolean(subagentOrchestrationTool);
+  const input = await deepSeekResponseInput(messages);
+  const hasImageInput = input.some((item) => Array.isArray(item?.content)
+    && item.content.some((part) => part?.type === "input_image"));
+  if (hasImageInput && model !== "deepseek-flash") {
+    throw new Error(`DeepSeek model ${model} does not support image input through this Responses adapter; switch this Bot to deepseek-flash for vision turns`);
+  }
+  const instructions = [
+    "You are the primary reasoning engine inside Grok Bot through GrokRouter.",
+    `The active provider is DeepSeek and the active model is ${model}.`,
+    "GrokRouter commands such as /provider, /models, /model, /reasoning, and /router are handled before inference.",
+    "Use only Grok tools actually supplied in this turn. Never invent a tool or claim it ran without a returned result.",
+    "Return the final answer directly as assistant text. Do not call a delivery tool merely to send the answer.",
+    "A background-task launch receipt is not its result; wait for the real completion before reporting it.",
+    ...(automaticGreeting ? ["This is the automatic new-Bot greeting. Reply briefly and do not call tools."] : []),
+    ...(subagentRequest && !offeredTools.length
+      ? ["No actionable Grok orchestration tool is available in this turn; do not claim that a sub-agent was launched."]
+      : []),
+  ].join(" ");
+  const baseBody = {
+    model,
+    input,
+    instructions,
+    reasoning: { effort: deepSeekReasoningEffort(config.deepSeekReasoning || "high") },
+    stream: false,
+    ...(offeredTools.length ? {
+      tools: offeredTools.map((tool) => ({
+        type: "function",
+        name: tool.name,
+        description: tool.description || "",
+        parameters: tool.parameters,
+      })),
+      tool_choice: forcedTool
+        ? { type: "function", name: forcedTool.name }
+        : requiresTool ? "required" : "auto",
+    } : {}),
+  };
+  const baseUrl = String(config.deepSeekBaseUrl || "https://api.deepseek.com").replace(/\/$/, "");
+  const request = async (body) => {
+    const response = await fetchImpl(`${baseUrl}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(Number(config.timeoutMs || 15 * 60_000)),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.error || payload?.status === "failed") {
+      const detail = typeof payload?.error?.message === "string" ? `: ${payload.error.message}` : "";
+      throw new Error(`DeepSeek Responses request failed (${response.status}${detail})`);
+    }
+    return { payload, ...parsedDeepSeekResponse(payload) };
+  };
+  let completion = await request(baseBody);
+  let retriedEmpty = false;
+  if (!completion.text && !completion.toolCalls.length) {
+    retriedEmpty = true;
+    completion = await request({
+      ...baseBody,
+      input: [
+        ...input,
+        {
+          type: "message",
+          role: "user",
+          content: config.nativeTextTask
+            ? "Return the text required by the original host task now."
+            : "The prior response was empty. Continue from the transcript and return either the next necessary Grok function call or the final user-facing answer.",
+        },
+      ],
+    });
+  }
+  return {
+    text: completion.text,
+    toolCalls: completion.toolCalls,
+    usage: {
+      inputTokens: Number(completion.payload?.usage?.input_tokens || 0),
+      outputTokens: Number(completion.payload?.usage?.output_tokens || 0),
+      cacheReadTokens: Number(completion.payload?.usage?.input_tokens_details?.cached_tokens || 0),
+      cacheWriteTokens: 0,
+    },
+    model: completion.payload?.model || model,
+    emptyResponse: !completion.text && !completion.toolCalls.length,
+    retriedEmpty,
+  };
+}
+
 function sanitizedTranscript(value, depth = 0, seen = new Set()) {
   if (depth > 9 || value == null) return value;
   if (typeof value === "string") {
@@ -1481,10 +1725,13 @@ function codexPrompt(config, messages, tools, resuming) {
 
 function parseCodexResult(text) {
   let payload;
+  const raw = String(text || "").trim();
+  const fenced = raw.match(/^\`\`\`(?:json)?\s*\n?([\s\S]*?)\n?\`\`\`$/i);
+  const candidate = fenced ? fenced[1].trim() : raw;
   try {
-    payload = JSON.parse(text);
+    payload = JSON.parse(candidate);
   } catch {
-    return { text: String(text || "").trim(), toolCalls: [] };
+    return { text: raw, toolCalls: [] };
   }
   const responseText = typeof payload?.text === "string" ? payload.text.trim() : "";
   const toolCalls = Array.isArray(payload?.toolCalls) ? payload.toolCalls.flatMap((call) => {
@@ -1590,6 +1837,178 @@ export async function runCodex(config, messages, tools, codexFactory = null) {
     usage,
     model: config.codexModel || "gpt-5.6-sol",
     threadId: thread.id,
+    ...(!parsed.text && !parsed.toolCalls.length ? { emptyResponse: true } : {}),
+    ...(retriedEmpty ? { retriedEmpty: true } : {}),
+  };
+}
+
+function claudeCodeRouterPrompt(config, messages, tools, resuming) {
+  if (config.nativeTextTask) {
+    return [
+      "Perform the Grok host text-processing task represented by this transcript.",
+      "Do not use tools, modify files, browse, or address the chat user.",
+      "Return only the required text.",
+      JSON.stringify(sanitizedTranscript(messages)),
+    ].join("\n");
+  }
+  const normalized = normalizeTools(tools);
+  const greeting = isAutomaticGreeting(messages);
+  const prepared = codexTranscriptMessages(messages);
+  const transcript = sanitizedTranscript(resuming ? prepared.slice(-20) : prepared);
+  return [
+    "You are Claude Code running as the selected reasoning and coding provider inside Grok Bot through GrokRouter.",
+    `The active provider is claude-code and the selected model is ${config.claudeCodeModel || "sonnet"}.`,
+    "Use your native Claude Code tools for work inside the configured workspace.",
+    greeting
+      ? "This is Grok Bot's automatic new-Bot greeting. Return one short friendly greeting and do not use tools."
+      : "The outer Grok host may expose additional computer, browser, file, and orchestration tools below.",
+    "When an outer Grok tool is required, do not pretend it is a Claude Code native tool. End your turn with exactly one JSON object of the form {\"text\":\"\",\"toolCalls\":[{\"toolCallId\":\"id\",\"toolName\":\"ToolName\",\"argumentsJson\":\"{...}\"}]}.",
+    "When no outer Grok tool is required, either answer normally or return {\"text\":\"final answer\",\"toolCalls\":[]}.",
+    "Never claim an outer tool ran unless its real result appears in the newest transcript update.",
+    "A background-task launch receipt is not a completion; wait for the real completion message.",
+    "",
+    `Outer Grok tool schemas (${normalized.length}):`,
+    JSON.stringify(normalized),
+    "",
+    resuming ? "Newest Grok transcript update:" : "Grok conversation (oldest to newest):",
+    JSON.stringify(transcript),
+  ].join("\n");
+}
+
+function claudeAssistantText(message) {
+  if (message?.type !== "assistant") return "";
+  const content = message?.message?.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+}
+
+function claudeUsage(message) {
+  const usage = message?.usage || {};
+  return {
+    inputTokens: Number(usage.input_tokens ?? usage.inputTokens ?? 0),
+    outputTokens: Number(usage.output_tokens ?? usage.outputTokens ?? 0),
+    cacheReadTokens: Number(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? 0),
+    cacheWriteTokens: Number(usage.cache_creation_input_tokens ?? usage.cacheWriteInputTokens ?? 0),
+  };
+}
+
+function claudeCodeEffort(value) {
+  if (value === "minimal") return "low";
+  if (value === "xhigh") return "max";
+  if (["low", "medium", "high", "max"].includes(value)) return value;
+  return "high";
+}
+
+async function createClaudeQuery() {
+  const sdk = await import("@anthropic-ai/claude-agent-sdk");
+  if (typeof sdk.query !== "function") throw new Error("Claude Agent SDK does not export query()");
+  return sdk.query;
+}
+
+export async function runClaudeCode(config, messages, tools, queryFactory = null) {
+  const query = queryFactory || await createClaudeQuery();
+  const model = config.claudeCodeModel || "sonnet";
+  const greeting = isAutomaticGreeting(messages);
+  const nativeTextTask = Boolean(config.nativeTextTask);
+  const allowedTools = nativeTextTask || greeting
+    ? []
+    : Array.isArray(config.claudeCodeAllowedTools) && config.claudeCodeAllowedTools.length
+      ? config.claudeCodeAllowedTools
+      : ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "Agent"];
+  const baseOptions = {
+    model,
+    cwd: config.workingDirectory || "/workspace",
+    maxTurns: Number(config.claudeCodeMaxTurns || 24),
+    allowedTools,
+    settingSources: nativeTextTask ? [] : ["user", "project", "local"],
+    permissionMode: nativeTextTask ? "plan" : (config.claudeCodePermissionMode || "bypassPermissions"),
+    ...(nativeTextTask ? {} : { allowDangerouslySkipPermissions: true }),
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      append: [
+        "You are embedded inside Grok Bot through GrokRouter.",
+        "GrokRouter owns the outer-tool permission boundary.",
+        "Do not invent successful Grok tool execution; only trust returned transcript results.",
+      ].join(" "),
+      snapshot: false,
+    },
+    effort: claudeCodeEffort(config.claudeCodeReasoning || "high"),
+    persistSession: !nativeTextTask,
+    env: { ...process.env, IS_SANDBOX: process.env.IS_SANDBOX || "1" },
+  };
+  let resuming = !nativeTextTask && Boolean(config.claudeCodeThreadId);
+  let sessionId = resuming ? config.claudeCodeThreadId : null;
+  const run = async () => {
+    const prompt = claudeCodeRouterPrompt(config, messages, tools, resuming);
+    const options = {
+      ...baseOptions,
+      ...(resuming ? { resume: config.claudeCodeThreadId } : {}),
+    };
+    let resultText = "";
+    let lastAssistantText = "";
+    let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    let sawResult = false;
+    for await (const message of query({ prompt, options })) {
+      if (typeof message?.session_id === "string" && message.session_id) sessionId = message.session_id;
+      const assistantText = claudeAssistantText(message);
+      if (assistantText) lastAssistantText = assistantText;
+      if (message?.type !== "result") continue;
+      sawResult = true;
+      if (message.subtype && message.subtype !== "success") {
+        const detail = Array.isArray(message.errors) ? message.errors.join("; ") : (message.error || message.subtype);
+        throw new Error(`Claude Code provider failed: ${redactDiagnostic(detail, 800)}`);
+      }
+      if (typeof message.result === "string" && message.result.trim()) resultText = message.result.trim();
+      usage = claudeUsage(message);
+    }
+    // Some Agent SDK paths have historically ended without a result event after
+    // sub-agent activity. Preserve the final assistant text as a defensive fallback.
+    const raw = resultText || lastAssistantText;
+    if (!raw && !sawResult) throw new Error("Claude Code provider ended without a result or assistant message");
+    return { raw, usage };
+  };
+  let turn;
+  try {
+    turn = await run();
+  } catch (error) {
+    if (!resuming) throw error;
+    resuming = false;
+    sessionId = null;
+    turn = await run();
+  }
+  let parsed = parseCodexResult(turn.raw);
+  if (nativeTextTask) parsed.toolCalls = [];
+  if (greeting && parsed.toolCalls.length) {
+    parsed = { text: "Ready. What would you like me to work on?", toolCalls: [] };
+  }
+  let retriedEmpty = false;
+  if (!parsed.text && !parsed.toolCalls.length) {
+    retriedEmpty = true;
+    const retryPrompt = nativeTextTask
+      ? "Return the required host task text now. Do not use tools."
+      : "Return either the final user-facing answer or one valid GrokRouter outer-tool JSON envelope now.";
+    let retryRaw = "";
+    for await (const message of query({
+      prompt: retryPrompt,
+      options: { ...baseOptions, ...(sessionId ? { resume: sessionId } : {}) },
+    })) {
+      if (typeof message?.session_id === "string" && message.session_id) sessionId = message.session_id;
+      if (message?.type === "result" && typeof message.result === "string") retryRaw = message.result.trim();
+      if (!retryRaw) retryRaw = claudeAssistantText(message) || retryRaw;
+    }
+    parsed = parseCodexResult(retryRaw);
+    if (nativeTextTask) parsed.toolCalls = [];
+  }
+  return {
+    ...parsed,
+    usage: turn.usage,
+    model,
+    threadId: sessionId,
     ...(!parsed.text && !parsed.toolCalls.length ? { emptyResponse: true } : {}),
     ...(retriedEmpty ? { retriedEmpty: true } : {}),
   };
@@ -1881,12 +2300,8 @@ async function stateForTurn(config, messages, sessionOptions) {
       conversationKey: key,
       sessionId: key.slice(0, 24),
       provider,
-      model: provider === "openrouter"
-        ? config.openRouterModel || "anthropic/claude-sonnet-4.6"
-        : config.codexModel || "gpt-5.6-sol",
-      reasoning: provider === "openrouter"
-        ? config.openRouterReasoning || "medium"
-        : config.codexReasoning || "medium",
+      model: defaultModel(config, provider),
+      reasoning: defaultReasoning(config, provider),
       threadId: null,
       threadEpoch: 0,
       tools: [],
@@ -1991,18 +2406,65 @@ function isChannelControlFollowOn(sessionOptions) {
     && Boolean(channelControlKey(sessionOptions));
 }
 
+const PROVIDER_SPECS = Object.freeze({
+  codex: {
+    label: "Codex SDK",
+    modelKey: "codexModel",
+    modelsKey: "codexModels",
+    reasoningKey: "codexReasoning",
+    defaultModel: "gpt-5.6-sol",
+    defaultReasoning: "medium",
+  },
+  openrouter: {
+    label: "OpenRouter",
+    modelKey: "openRouterModel",
+    modelsKey: "openRouterModels",
+    reasoningKey: "openRouterReasoning",
+    defaultModel: "anthropic/claude-sonnet-4.6",
+    defaultReasoning: "medium",
+  },
+  "claude-code": {
+    label: "Claude Code",
+    modelKey: "claudeCodeModel",
+    modelsKey: "claudeCodeModels",
+    reasoningKey: "claudeCodeReasoning",
+    defaultModel: "sonnet",
+    defaultReasoning: "high",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    modelKey: "deepSeekModel",
+    modelsKey: "deepSeekModels",
+    reasoningKey: "deepSeekReasoning",
+    defaultModel: "deepseek-flash",
+    defaultReasoning: "high",
+  },
+});
+
+function providerSpec(provider) {
+  return PROVIDER_SPECS[provider] || null;
+}
+
 function providerLabel(provider) {
-  return provider === "openrouter" ? "OpenRouter" : "Codex SDK";
+  return providerSpec(provider)?.label || provider;
 }
 
 function defaultModel(config, provider) {
-  return provider === "openrouter"
-    ? config.openRouterModel || "anthropic/claude-sonnet-4.6"
-    : config.codexModel || "gpt-5.6-sol";
+  const spec = providerSpec(provider);
+  if (!spec) throw new Error(`Unsupported provider: ${provider}`);
+  return config[spec.modelKey] || spec.defaultModel;
+}
+
+function defaultReasoning(config, provider) {
+  const spec = providerSpec(provider);
+  if (!spec) throw new Error(`Unsupported provider: ${provider}`);
+  return config[spec.reasoningKey] || spec.defaultReasoning;
 }
 
 function configuredModels(config, provider) {
-  const models = provider === "openrouter" ? config.openRouterModels : config.codexModels;
+  const spec = providerSpec(provider);
+  if (!spec) return [];
+  const models = config[spec.modelsKey];
   return [...new Set([
     defaultModel(config, provider),
     ...(Array.isArray(models) ? models.filter((model) => typeof model === "string") : []),
@@ -2010,32 +2472,57 @@ function configuredModels(config, provider) {
 }
 
 function modelAliases(provider) {
-  return provider === "openrouter"
-    ? {
+  if (provider === "openrouter") {
+    return {
       claude: "anthropic/claude-sonnet-4.6",
       sonnet: "anthropic/claude-sonnet-4.6",
       gemini: "google/gemini-3.1-pro-preview",
       sol: "openai/gpt-5.6-sol",
       terra: "openai/gpt-5.6-terra",
       luna: "openai/gpt-5.6-luna",
-    }
-    : { sol: "gpt-5.6-sol", terra: "gpt-5.6-terra", luna: "gpt-5.6-luna", "gpt-5.6": "gpt-5.6-sol" };
+    };
+  }
+  if (provider === "claude-code") {
+    return { claude: "sonnet", sonnet: "sonnet", opus: "opus", haiku: "haiku" };
+  }
+  if (provider === "deepseek") {
+    return { deepseek: "deepseek-flash", flash: "deepseek-flash", pro: "deepseek-v4-pro", v4: "deepseek-v4-pro" };
+  }
+  return { sol: "gpt-5.6-sol", terra: "gpt-5.6-terra", luna: "gpt-5.6-luna", "gpt-5.6": "gpt-5.6-sol" };
+}
+
+function validProviderModel(config, provider, model) {
+  if (provider === "openrouter") return /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:+-]*$/i.test(model);
+  return configuredModels(config, provider).includes(model);
 }
 
 async function doctorText(config, state) {
   const checks = [];
+  const enabled = Array.isArray(config.providers) ? config.providers : ["codex"];
   checks.push(`Router ${ROUTER_VERSION}: OK`);
   checks.push(`Provider: ${providerLabel(state.provider)} (${state.model})`);
   checks.push(`Runtime: Node ${process.version}`);
-  try {
-    await persistedOpenRouterKey(config);
-    checks.push("OpenRouter credential: configured and valid shape");
-  } catch (error) {
-    checks.push(String(error?.message || error).includes("present but")
-      ? "OpenRouter credential: present but invalid shape"
-      : "OpenRouter credential: not configured");
+  if (enabled.includes("openrouter")) {
+    try {
+      await persistedOpenRouterKey(config);
+      checks.push("OpenRouter credential: configured and valid shape");
+    } catch (error) {
+      checks.push(String(error?.message || error).includes("present but")
+        ? "OpenRouter credential: present but invalid shape"
+        : "OpenRouter credential: not configured");
+    }
   }
-  if (state.provider === "codex" || (config.providers || []).includes("codex")) {
+  if (enabled.includes("deepseek")) {
+    try {
+      await persistedDeepSeekKey(config);
+      checks.push("DeepSeek credential: configured and valid shape");
+    } catch (error) {
+      checks.push(String(error?.message || error).includes("present but")
+        ? "DeepSeek credential: present but invalid shape"
+        : "DeepSeek credential: not configured");
+    }
+  }
+  if (enabled.includes("codex")) {
     const cli = join(runtimeDirectory, "node_modules", ".bin", "codex");
     try {
       await stat(cli);
@@ -2044,7 +2531,23 @@ async function doctorText(config, state) {
       checks.push("Codex CLI: missing");
     }
   }
-  checks.push(`Grok tools: bridged on demand (${state.provider === "codex" ? "structured adapter" : "native function calls"})`);
+  if (enabled.includes("claude-code")) {
+    const sdk = join(runtimeDirectory, "node_modules", "@anthropic-ai", "claude-agent-sdk", "sdk.mjs");
+    try {
+      await stat(sdk);
+      checks.push("Claude Agent SDK: installed");
+    } catch {
+      checks.push("Claude Agent SDK: missing");
+    }
+    const cli = join(runtimeDirectory, "node_modules", ".bin", "claude");
+    try {
+      await stat(cli);
+      checks.push("Claude Code CLI: installed");
+    } catch {
+      checks.push("Claude Code CLI: missing");
+    }
+  }
+  checks.push(`Grok tools: bridged on demand for ${providerLabel(state.provider)}`);
   checks.push("Run a real computer and sub-agent parity test before treating those capabilities as verified for a model.");
   return checks.join("\n");
 }
@@ -2073,7 +2576,7 @@ async function controlResult(config, key, state, input) {
   if (command === "/router help" || command === "/providers") {
     return result([
       "GrokRouter controls:",
-      "• /provider codex|openrouter — switch this bot",
+      "• /provider codex|claude-code|deepseek|openrouter — switch this bot",
       "• /provider — show active provider",
       "• /models — list configured models",
       "• /model <id> — switch this bot's model",
@@ -2096,16 +2599,14 @@ async function controlResult(config, key, state, input) {
     });
     return result("Provider thread reset. The Grok transcript remains available and will seed the next turn.");
   }
-  const providerMatch = normalized.match(/^\/(?:provider|router)\s+(codex|openrouter)$/i);
+  const providerMatch = normalized.match(/^\/(?:provider|router)\s+(codex|claude-code|deepseek|openrouter)$/i);
   if (providerMatch) {
     const provider = providerMatch[1].toLowerCase();
     const allowed = Array.isArray(config.providers) ? config.providers : ["codex"];
     if (!allowed.includes(provider)) return result(`Provider “${provider}” is not enabled. Available: ${allowed.join(", ")}.`);
     const previous = `${providerLabel(state.provider)} (${state.model})`;
     const model = defaultModel(config, provider);
-    const reasoning = provider === "openrouter"
-      ? config.openRouterReasoning || "medium"
-      : config.codexReasoning || "medium";
+    const reasoning = defaultReasoning(config, provider);
     await persist({
       provider,
       model,
@@ -2132,11 +2633,8 @@ async function controlResult(config, key, state, input) {
   if (modelMatch) {
     const requested = modelMatch[1].trim();
     const model = modelAliases(state.provider)[requested.toLowerCase()] || requested;
-    if (state.provider === "codex" && !configuredModels(config, "codex").includes(model)) {
-      return result(`Unknown Codex model “${requested}”. Use /models to see the supported models.`);
-    }
-    if (state.provider === "openrouter" && !/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:+-]*$/i.test(model)) {
-      return result(`Invalid OpenRouter model ID “${requested}”. Use vendor/model format.`);
+    if (!validProviderModel(config, state.provider, model)) {
+      return result(`Unknown or invalid ${providerLabel(state.provider)} model “${requested}”. Use /models to see the supported models.`);
     }
     const previous = state.model;
     await persist({ model, threadId: null, threadEpoch: Number(state.threadEpoch || 0) + 1 });
@@ -2196,6 +2694,22 @@ function rewriteHostToolCallIds(toolCalls) {
   }));
 }
 
+async function runSelectedProvider(provider, config, messages, tools, dependencies = {}) {
+  if (provider === "openrouter") {
+    return runOpenRouter(config, messages, tools, dependencies.openRouterFetchImpl || dependencies.fetchImpl);
+  }
+  if (provider === "deepseek") {
+    return runDeepSeek(config, messages, tools, dependencies.deepSeekFetchImpl || dependencies.fetchImpl);
+  }
+  if (provider === "claude-code") {
+    return runClaudeCode(config, messages, tools, dependencies.claudeQueryFactory);
+  }
+  if (provider === "codex") {
+    return runCodex(config, messages, tools, dependencies.codexFactory);
+  }
+  throw new Error(`Unsupported provider: ${provider}`);
+}
+
 export async function runTurn(input, dependencies = {}) {
   const config = input.config && typeof input.config === "object" ? input.config : {};
   const messages = Array.isArray(input.messages) ? input.messages : [];
@@ -2206,17 +2720,17 @@ export async function runTurn(input, dependencies = {}) {
     ? sessionOptions.grokBotRouterTextTask : "";
   if (nativeTextTask) {
     const taskConfig = {
-      ...config, nativeTextTask, codexThreadId: null,
+      ...config, nativeTextTask, codexThreadId: null, claudeCodeThreadId: null,
       codexModel: state.model, codexReasoning: state.reasoning,
       openRouterModel: state.model, openRouterReasoning: state.reasoning,
+      claudeCodeModel: state.model, claudeCodeReasoning: state.reasoning,
+      deepSeekModel: state.model, deepSeekReasoning: state.reasoning,
       adapterSessionId: `${state.sessionId}:${nativeTextTask}`,
     };
     const receipt = { task: nativeTextTask, sessionId: state.sessionId, provider: state.provider, model: state.model, toolNames: [] };
     await appendAudit(config, { event: "native_text_task_start", ...receipt });
     try {
-      const output = state.provider === "openrouter"
-        ? await runOpenRouter(taskConfig, messages, [], dependencies.fetchImpl)
-        : await runCodex(taskConfig, messages, [], dependencies.codexFactory);
+      const output = await runSelectedProvider(state.provider, taskConfig, messages, [], dependencies);
       if (output.emptyResponse) throw new Error("Native text task returned an empty response after one retry");
       await appendAudit(config, { event: "native_text_task_ok", ...receipt });
       // A helper never resumes or replaces the Bot's conversation thread,
@@ -2387,6 +2901,11 @@ export async function runTurn(input, dependencies = {}) {
     codexThreadId: state.threadId,
     openRouterModel: state.model,
     openRouterReasoning: state.reasoning,
+    claudeCodeModel: state.model,
+    claudeCodeReasoning: state.reasoning,
+    claudeCodeThreadId: state.threadId,
+    deepSeekModel: state.model,
+    deepSeekReasoning: state.reasoning,
     adapterSessionId: state.sessionId,
   };
   const threadEpoch = Number(state.threadEpoch || 0);
@@ -2414,9 +2933,7 @@ export async function runTurn(input, dependencies = {}) {
   });
   let result;
   try {
-    result = state.provider === "openrouter"
-      ? await runOpenRouter(turnConfig, messages, effectiveTools, dependencies.fetchImpl)
-      : await runCodex(turnConfig, messages, effectiveTools, dependencies.codexFactory);
+    result = await runSelectedProvider(state.provider, turnConfig, messages, effectiveTools, dependencies);
     if (result.emptyResponse) {
       const completion = latestAutomationCompletion(messages);
       if (pendingBackgroundIds.length) {
@@ -2424,7 +2941,7 @@ export async function runTurn(input, dependencies = {}) {
       } else if (automationContinuation && completion?.text) {
         result = { ...result, text: completion.text, emptyResponse: false, emptyRecovery: "automation-completion" };
       } else {
-        throw new Error(`${state.provider === "codex" ? "Codex SDK" : "OpenRouter"} returned an empty response after one retry`);
+        throw new Error(`${providerLabel(state.provider)} returned an empty response after one retry`);
       }
     }
     result.toolCalls = rewriteHostToolCallIds(result.toolCalls);

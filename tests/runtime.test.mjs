@@ -12,6 +12,7 @@ import {
   automationCompletionText,
   automationContinuationSignature,
   codexTranscriptMessages,
+  deepSeekResponseInput,
   conversationIdentity,
   structuredRouterControlText,
   extractUserQuery,
@@ -22,7 +23,9 @@ import {
   normalizeTools,
   openRouterMessages,
   recoveredTextualOpenRouterToolCalls,
+  runClaudeCode,
   runCodex,
+  runDeepSeek,
   runOpenRouter,
   runTurn,
   userTurnFingerprint,
@@ -31,6 +34,7 @@ import {
 
 const user = (text) => ({ role: "user", content: [{ type: "text", text }] });
 const TEST_OPENROUTER_KEY = ["sk", "or", "v1", "syntheticfixture0000000000000000"].join("-");
+const TEST_DEEPSEEK_KEY = ["sk", "syntheticdeepseekfixture000000000000"].join("-");
 
 test("extracts router controls only from exact or pure group-addressed input", () => {
   assert.equal(addressedRouterControlText("/provider"), "/provider");
@@ -1155,6 +1159,190 @@ test("OpenRouter reports an invalid key stored in Grok Secrets", async () => {
   }
 });
 
+test("DeepSeek uses the stateless Responses API and preserves Grok function calls", async () => {
+  const previous = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = TEST_DEEPSEEK_KEY;
+  let request;
+  try {
+    const result = await runDeepSeek(
+      { deepSeekModel: "deepseek-flash", deepSeekReasoning: "high" },
+      [
+        user("Use the Shell tool to inspect the workspace"),
+        {
+          role: "assistant",
+          content: [{
+            type: "tool-call",
+            toolCallId: "old-call",
+            toolName: "Read",
+            args: { path: "README.md" },
+          }],
+        },
+        {
+          role: "user",
+          content: [{
+            type: "tool-result",
+            toolCallId: "old-call",
+            result: "README fixture",
+          }],
+        },
+      ],
+      [{ name: "Shell", description: "Run shell command", inputSchema: { type: "object", properties: { command: { type: "string" } } } }],
+      async (url, init) => {
+        request = { url, headers: init.headers, body: JSON.parse(init.body) };
+        return new Response(JSON.stringify({
+          model: "deepseek-flash",
+          output: [{
+            type: "function_call",
+            call_id: "deepseek-call-1",
+            name: "Shell",
+            arguments: "{\"command\":\"pwd\"}",
+          }],
+          usage: { input_tokens: 21, output_tokens: 5, input_tokens_details: { cached_tokens: 3 } },
+        }), { status: 200 });
+      },
+    );
+    assert.equal(request.url, "https://api.deepseek.com/responses");
+    assert.equal(request.body.model, "deepseek-flash");
+    assert.equal(request.body.previous_response_id, undefined);
+    assert.ok(request.body.input.some((item) => item.type === "function_call"));
+    assert.ok(request.body.input.some((item) => item.type === "function_call_output"));
+    assert.equal(request.body.tools[0].type, "function");
+    assert.equal(result.toolCalls[0].toolName, "Shell");
+    assert.deepEqual(result.toolCalls[0].args, { command: "pwd" });
+    assert.equal(result.threadId, undefined);
+    assert.equal(JSON.stringify(result).includes(TEST_DEEPSEEK_KEY), false);
+  } finally {
+    if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previous;
+  }
+});
+
+test("DeepSeek rejects vision turns on non-vision model before network access", async () => {
+  const previous = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = TEST_DEEPSEEK_KEY;
+  try {
+    await assert.rejects(
+      runDeepSeek(
+        { deepSeekModel: "deepseek-v4-pro" },
+        [{
+          role: "user",
+          content: [
+            { type: "text", text: "Describe this image" },
+            { type: "image", mimeType: "image/png", data: "AA==" },
+          ],
+        }],
+        [],
+        async () => { throw new Error("network request should not run"); },
+      ),
+      /switch this Bot to deepseek-flash for vision turns/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previous;
+  }
+});
+
+test("DeepSeek transcript conversion emits Responses function call pairs", async () => {
+  const input = await deepSeekResponseInput([
+    user("read it"),
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "checking" },
+        { type: "tool-call", toolCallId: "call-1", toolName: "Read", args: { path: "x" } },
+      ],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool-result", toolCallId: "call-1", result: "done" }],
+    },
+  ]);
+  assert.ok(input.some((item) => item.type === "message" && item.role === "assistant"));
+  assert.deepEqual(input.find((item) => item.type === "function_call"), {
+    type: "function_call", call_id: "call-1", name: "Read", arguments: "{\"path\":\"x\"}",
+  });
+  assert.deepEqual(input.find((item) => item.type === "function_call_output"), {
+    type: "function_call_output", call_id: "call-1", output: "done",
+  });
+});
+
+test("Claude Code resumes its Agent SDK session and can request one outer Grok tool", async () => {
+  const calls = [];
+  const query = ({ prompt, options }) => (async function* () {
+    calls.push({ prompt, options });
+    yield {
+      type: "result",
+      subtype: "success",
+      session_id: "claude-session-next",
+      result: JSON.stringify({
+        text: "",
+        toolCalls: [{
+          toolCallId: "claude-outer-1",
+          toolName: "Computer",
+          argumentsJson: "{\"action\":\"screenshot\"}",
+        }],
+      }),
+      usage: {
+        input_tokens: 31,
+        output_tokens: 7,
+        cache_read_input_tokens: 4,
+        cache_creation_input_tokens: 2,
+      },
+    };
+  })();
+  const result = await runClaudeCode(
+    {
+      claudeCodeThreadId: "claude-session-existing",
+      claudeCodeModel: "sonnet",
+      claudeCodeReasoning: "xhigh",
+      workingDirectory: "/workspace",
+    },
+    [user("Take a screenshot with the outer Grok Computer tool")],
+    [{ name: "Computer", inputSchema: { type: "object" } }],
+    query,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.resume, "claude-session-existing");
+  assert.equal(calls[0].options.model, "sonnet");
+  assert.equal(calls[0].options.cwd, "/workspace");
+  assert.equal(calls[0].options.effort, "max");
+  assert.ok(calls[0].options.allowedTools.includes("Bash"));
+  assert.match(calls[0].prompt, /active provider is claude-code/);
+  assert.equal(result.threadId, "claude-session-next");
+  assert.equal(result.toolCalls[0].toolName, "Computer");
+  assert.deepEqual(result.toolCalls[0].args, { action: "screenshot" });
+});
+
+test("router controls switch a Bot among Codex, Claude Code, and DeepSeek without inference", async () => {
+  const root = await mkdtemp(join(tmpdir(), "grokbot-router-three-provider-"));
+  const config = {
+    provider: "codex",
+    providers: ["codex", "claude-code", "deepseek"],
+    codexModel: "gpt-5.6-sol",
+    claudeCodeModel: "sonnet",
+    claudeCodeModels: ["sonnet", "opus", "haiku"],
+    deepSeekModel: "deepseek-flash",
+    deepSeekModels: ["deepseek-flash", "deepseek-v4-pro"],
+    statePath: join(root, "states.json"),
+  };
+  try {
+    const claude = await runTurn({ config, messages: [user("/provider claude-code")], sessionOptions: { botId: "three-provider" } });
+    assert.equal(claude.provider, "claude-code");
+    assert.match(claude.text, /Claude Code/);
+    const opus = await runTurn({ config, messages: [user("/model opus")], sessionOptions: { botId: "three-provider" } });
+    assert.equal(opus.model, "opus");
+    const deepseek = await runTurn({ config, messages: [user("/provider deepseek")], sessionOptions: { botId: "three-provider" } });
+    assert.equal(deepseek.provider, "deepseek");
+    assert.equal(deepseek.model, "deepseek-flash");
+    const pro = await runTurn({ config, messages: [user("/model deepseek-v4-pro")], sessionOptions: { botId: "three-provider" } });
+    assert.equal(pro.model, "deepseek-v4-pro");
+    const codex = await runTurn({ config, messages: [user("/provider codex")], sessionOptions: { botId: "three-provider" } });
+    assert.equal(codex.provider, "codex");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Codex returns structured Grok tool calls and resumes a saved thread", async () => {
   const calls = [];
   const thread = {
@@ -1605,7 +1793,7 @@ test("a brand-new Bot accepts the exact model workflow and forgiving screenshot 
       messages: [user("/models not-a-model")],
       sessionOptions: { botId: "third-brand-new-bot" },
     }, { fetchImpl: neverInfer });
-    assert.match(malformed.text, /Invalid OpenRouter model ID/);
+    assert.match(malformed.text, /Unknown or invalid OpenRouter model/);
 
     const nearMisses = [
       ["/Provider", /OpenRouter is active/],

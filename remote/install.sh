@@ -8,12 +8,18 @@ INSTALL_PARENT="/home/box/sand-data"
 GROK_VERSION="0.30.0"
 DEFAULT_PROVIDER="codex"
 CODEX_MODEL="gpt-5.6-sol"
+CLAUDE_CODE_MODEL="sonnet"
+DEEPSEEK_MODEL="deepseek-flash"
 OPENROUTER_MODEL="anthropic/claude-sonnet-4.6"
-ENABLED_PROVIDERS="codex,openrouter"
+ENABLED_PROVIDERS="codex,claude-code,deepseek"
 PROVIDER_EXPLICIT=0
 PROVIDERS_EXPLICIT=0
 CODEX_MODEL_EXPLICIT=0
+CLAUDE_CODE_MODEL_EXPLICIT=0
+DEEPSEEK_MODEL_EXPLICIT=0
 OPENROUTER_MODEL_EXPLICIT=0
+CLAUDE_AGENT_SDK_VERSION="0.3.288"
+CLAUDE_CODE_CLI_VERSION="2.1.288"
 START_WATCHDOG=1
 GROK_SKILLS_ROOT="${ROUTER_GROK_SKILLS_ROOT:-/home/box/.grok/skills}"
 INSTALL_ATTEMPT="${ROUTER_INSTALL_ATTEMPT:-LOCAL}"
@@ -52,9 +58,11 @@ usage() {
     "" \
     "Usage: install.sh [options]" \
     "  --grok-version VERSION       Exact desktop version verified by the installer" \
-    "  --provider codex|openrouter" \
-    "  --providers codex|openrouter|codex,openrouter" \
+    "  --provider codex|claude-code|deepseek|openrouter" \
+    "  --providers LIST             Comma-separated enabled providers" \
     "  --codex-model MODEL" \
+    "  --claude-code-model MODEL" \
+    "  --deepseek-model MODEL" \
     "  --openrouter-model vendor/model" \
     "  --install-root PATH          Development/testing only" \
     "  --no-restart                 Do not restart the Grok host"
@@ -80,6 +88,16 @@ while [[ $# -gt 0 ]]; do
     --codex-model)
       CODEX_MODEL="${2:?missing Codex model}"
       CODEX_MODEL_EXPLICIT=1
+      shift 2
+      ;;
+    --claude-code-model)
+      CLAUDE_CODE_MODEL="${2:?missing Claude Code model}"
+      CLAUDE_CODE_MODEL_EXPLICIT=1
+      shift 2
+      ;;
+    --deepseek-model)
+      DEEPSEEK_MODEL="${2:?missing DeepSeek model}"
+      DEEPSEEK_MODEL_EXPLICIT=1
       shift 2
       ;;
     --openrouter-model)
@@ -108,15 +126,22 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$DEFAULT_PROVIDER" != "codex" && "$DEFAULT_PROVIDER" != "openrouter" ]]; then
-  fail_install "INVALID_PROVIDER" "--provider must be codex or openrouter"
+VALID_PROVIDERS=",codex,claude-code,deepseek,openrouter,"
+if [[ "$VALID_PROVIDERS" != *",$DEFAULT_PROVIDER,"* ]]; then
+  fail_install "INVALID_PROVIDER" "--provider must be codex, claude-code, deepseek, or openrouter"
 fi
 if [[ ! "$OPENROUTER_MODEL" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:+-]+$ ]]; then
   fail_install "INVALID_OPENROUTER_MODEL" "--openrouter-model must use vendor/model format"
 fi
-if [[ "$ENABLED_PROVIDERS" != "codex" && "$ENABLED_PROVIDERS" != "openrouter" && "$ENABLED_PROVIDERS" != "codex,openrouter" && "$ENABLED_PROVIDERS" != "openrouter,codex" ]]; then
-  fail_install "INVALID_PROVIDERS" "--providers must be codex, openrouter, or codex,openrouter"
+IFS=',' read -r -a enabled_provider_list <<< "$ENABLED_PROVIDERS"
+if (( ${#enabled_provider_list[@]} == 0 )); then
+  fail_install "INVALID_PROVIDERS" "--providers cannot be empty"
 fi
+for enabled_provider in "${enabled_provider_list[@]}"; do
+  if [[ -z "$enabled_provider" || "$VALID_PROVIDERS" != *",$enabled_provider,"* ]]; then
+    fail_install "INVALID_PROVIDERS" "--providers contains unsupported provider: $enabled_provider"
+  fi
+done
 
 emit_phase "PREFLIGHT"
 for command_name in node npm python3 sha256sum; do
@@ -211,6 +236,10 @@ ROUTER_PROVIDERS="$ENABLED_PROVIDERS" \
 ROUTER_PROVIDERS_EXPLICIT="$PROVIDERS_EXPLICIT" \
 ROUTER_CODEX_MODEL="$CODEX_MODEL" \
 ROUTER_CODEX_MODEL_EXPLICIT="$CODEX_MODEL_EXPLICIT" \
+ROUTER_CLAUDE_CODE_MODEL="$CLAUDE_CODE_MODEL" \
+ROUTER_CLAUDE_CODE_MODEL_EXPLICIT="$CLAUDE_CODE_MODEL_EXPLICIT" \
+ROUTER_DEEPSEEK_MODEL="$DEEPSEEK_MODEL" \
+ROUTER_DEEPSEEK_MODEL_EXPLICIT="$DEEPSEEK_MODEL_EXPLICIT" \
 ROUTER_OPENROUTER_MODEL="$OPENROUTER_MODEL" \
 ROUTER_OPENROUTER_MODEL_EXPLICIT="$OPENROUTER_MODEL_EXPLICIT" \
 python3 - <<'PY'
@@ -228,18 +257,25 @@ defaults = json.loads(defaults_path.read_text())
 config["grokBotVersion"] = os.environ["ROUTER_GROK_VERSION"]
 install_root = os.environ["ROUTER_INSTALL_ROOT"]
 provider = os.environ["ROUTER_PROVIDER"]
-if os.environ["ROUTER_PROVIDER_EXPLICIT"] != "1" and config.get("provider") in {"codex", "openrouter"}:
+allowed_providers = {"codex", "claude-code", "deepseek", "openrouter"}
+if os.environ["ROUTER_PROVIDER_EXPLICIT"] != "1" and config.get("provider") in allowed_providers:
     provider = config["provider"]
 providers = list(dict.fromkeys(os.environ["ROUTER_PROVIDERS"].split(",")))
 if os.environ["ROUTER_PROVIDERS_EXPLICIT"] != "1":
     existing = config.get("providers")
-    if isinstance(existing, list) and existing and all(item in {"codex", "openrouter"} for item in existing):
+    if isinstance(existing, list) and existing and all(item in allowed_providers for item in existing):
         providers = list(dict.fromkeys(existing))
 if provider not in providers:
     providers.insert(0, provider)
 codex_model = os.environ["ROUTER_CODEX_MODEL"]
 if os.environ["ROUTER_CODEX_MODEL_EXPLICIT"] != "1" and isinstance(config.get("codexModel"), str):
     codex_model = config["codexModel"]
+claude_code_model = os.environ["ROUTER_CLAUDE_CODE_MODEL"]
+if os.environ["ROUTER_CLAUDE_CODE_MODEL_EXPLICIT"] != "1" and isinstance(config.get("claudeCodeModel"), str):
+    claude_code_model = config["claudeCodeModel"]
+deepseek_model = os.environ["ROUTER_DEEPSEEK_MODEL"]
+if os.environ["ROUTER_DEEPSEEK_MODEL_EXPLICIT"] != "1" and isinstance(config.get("deepSeekModel"), str):
+    deepseek_model = config["deepSeekModel"]
 openrouter_model = os.environ["ROUTER_OPENROUTER_MODEL"]
 if os.environ["ROUTER_OPENROUTER_MODEL_EXPLICIT"] != "1" and isinstance(config.get("openRouterModel"), str):
     openrouter_model = config["openRouterModel"]
@@ -249,9 +285,18 @@ config.update({
     "provider": provider,
     "providers": providers,
     "codexModel": codex_model,
+    "claudeCodeModel": claude_code_model,
+    "deepSeekModel": deepseek_model,
     "openRouterModel": openrouter_model,
     "codexModels": defaults.get("codexModels", []),
+    "claudeCodeModels": defaults.get("claudeCodeModels", []),
+    "deepSeekModels": defaults.get("deepSeekModels", []),
     "openRouterModels": defaults.get("openRouterModels", []),
+    "claudeCodeReasoning": config.get("claudeCodeReasoning", defaults.get("claudeCodeReasoning", "high")),
+    "claudeCodePermissionMode": config.get("claudeCodePermissionMode", defaults.get("claudeCodePermissionMode", "bypassPermissions")),
+    "claudeCodeMaxTurns": config.get("claudeCodeMaxTurns", defaults.get("claudeCodeMaxTurns", 24)),
+    "deepSeekReasoning": config.get("deepSeekReasoning", defaults.get("deepSeekReasoning", "high")),
+    "deepSeekBaseUrl": config.get("deepSeekBaseUrl", defaults.get("deepSeekBaseUrl", "https://api.deepseek.com")),
     "runnerPath": f"{install_root}/run-provider.mjs",
     "nodePath": "/usr/bin/node",
     "statePath": f"{install_root}/conversation-states.json",
@@ -264,6 +309,8 @@ PY
 DEFAULT_PROVIDER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["provider"])' "$STAGE_ROOT/provider.json")"
 ENABLED_PROVIDERS="$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["providers"]))' "$STAGE_ROOT/provider.json")"
 CODEX_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["codexModel"])' "$STAGE_ROOT/provider.json")"
+CLAUDE_CODE_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["claudeCodeModel"])' "$STAGE_ROOT/provider.json")"
+DEEPSEEK_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["deepSeekModel"])' "$STAGE_ROOT/provider.json")"
 OPENROUTER_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["openRouterModel"])' "$STAGE_ROOT/provider.json")"
 
 emit_phase "INSTALL_DEPENDENCIES"
@@ -301,9 +348,24 @@ if [[ "$ENABLED_PROVIDERS" == *codex* ]]; then
       --fetch-timeout=30000)
   fi
 else
-  printf '[3/6] OpenRouter-only setup needs no dependency download\n'
+  mkdir -p "$STAGE_ROOT/node_modules"
+  printf '[3/6] Codex SDK is disabled; skipping its dependency download\n'
 fi
 
+if [[ "$ENABLED_PROVIDERS" == *claude-code* ]]; then
+  printf '[3/6] Installing pinned Claude Agent SDK and Claude Code CLI\n'
+  (cd "$STAGE_ROOT" && npm install \
+    --no-save \
+    --package-lock=false \
+    --omit=dev \
+    --ignore-scripts \
+    --no-audit \
+    --no-fund \
+    "@anthropic-ai/claude-agent-sdk@$CLAUDE_AGENT_SDK_VERSION" \
+    "@anthropic-ai/claude-code@$CLAUDE_CODE_CLI_VERSION")
+fi
+
+# DeepSeek uses the built-in fetch/Responses adapter and needs no npm package.
 # Runtime replacement must retain Bot selections, provider threads, durable
 # delivery receipts, and the redacted audit. Temporary files and process locks
 # belong to the previous process generation and must not survive the swap.
@@ -468,6 +530,12 @@ printf 'Default provider: %s\n' "$DEFAULT_PROVIDER"
 printf 'Enabled providers: %s\n' "$ENABLED_PROVIDERS"
 if [[ "$ENABLED_PROVIDERS" == *codex* ]]; then
   printf 'Next: run grokbot-router auth codex, then complete the device sign-in.\n'
+fi
+if [[ "$ENABLED_PROVIDERS" == *claude-code* ]]; then
+  printf 'Next: run grokbot-router auth claude-code, then complete Claude login.\n'
+fi
+if [[ "$ENABLED_PROVIDERS" == *deepseek* ]]; then
+  printf 'DeepSeek uses DEEPSEEK_API_KEY saved through Grok Bot Secrets.\n'
 fi
 if [[ "$ENABLED_PROVIDERS" == *openrouter* ]]; then
   printf 'OpenRouter uses the OPENROUTER_API_KEY saved through Grok Bot Secrets.\n'

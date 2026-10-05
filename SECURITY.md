@@ -8,19 +8,20 @@ The official source is <https://github.com/promptadvisers/grokrouter>. The suppo
 
 The macOS installer validates `/Applications/Grok Bot.app`. The Windows installer locates the official app, requires Grok Bot 0.30.0, and requires a valid Authenticode signature before continuing. Each restarts Grok Bot with an Electron diagnostic port bound only to `127.0.0.1` and uses the local connection to operate the already-visible noVNC Bot computer. The Mac app does not request operating-system Accessibility, Screen Recording, or Full Disk Access permissions; the Windows renderer runs with context isolation, no Node integration, and the Electron sandbox enabled.
 
-Inside the Bot computer, the bootstrap can write under `/home/box/sand-data/grokbot-router`, back up and atomically replace `/home/box/sand-host/host-main.cjs`, run `npm ci`, restart the Grok host process, and invoke the installed Codex login flow.
+Inside the Bot computer, the bootstrap can write under `/home/box/sand-data/grokbot-router`, back up and atomically replace `/home/box/sand-host/host-main.cjs`, install pinned runtime dependencies, restart the Grok host process, and invoke the installed Codex or Claude Code login flow.
 
 ## Credentials
 
 - Codex authentication is handled by the pinned Codex CLI/SDK device flow inside the Bot computer.
-- An OpenRouter key entered in GrokRouter is passed over the loopback-only DevTools session directly to `window.desktop.secrets.upsert` and Grok Bot's protected Secrets store. The installer clears its field after the protected handoff.
-- The runtime reads the key from the environment or Grok Bot Secrets at request time.
+- Claude Code authentication is handled by the pinned Claude Code CLI flow inside the Bot computer; the router stores only the provider session identifier, not an OAuth credential.
+- DeepSeek and OpenRouter keys entered in GrokRouter are passed over the loopback-only DevTools session directly to `window.desktop.secrets.upsert` and Grok Bot's protected Secrets store. The installer clears those fields after the protected handoff.
+- The runtime reads DeepSeek/OpenRouter keys from the explicit child environment allowlist or Grok Bot Secrets at request time.
 - Credentials are never intentionally printed, included in provider state, included in release artifacts, or sent to audit logs.
 - `grokbot-router doctor` reports presence/status only and redacts account email output.
 
 ## Network destinations
 
-Depending on selected providers, the Bot computer connects to npm during installation, OpenAI/Codex endpoints for Codex operation, and `openrouter.ai` for OpenRouter completions. The routed model receives the Grok conversation and any attachments/tool results needed for the turn. Selecting a third-party OpenRouter model means that provider may also process the request under OpenRouter's routing and privacy terms.
+Depending on selected providers, the Bot computer can connect to npm during installation, OpenAI/Codex endpoints for Codex operation, Anthropic/Claude endpoints for Claude Code, `api.deepseek.com` for native DeepSeek Responses requests, and `openrouter.ai` for optional OpenRouter compatibility. The selected provider receives the Grok conversation and any attachments/tool results required for that routed turn.
 
 ## Integrity and recovery
 

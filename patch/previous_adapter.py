@@ -69,7 +69,8 @@ function getGrokBotRouterChildEnv() {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM",
     "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CODEX_HOME",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "OPENROUTER_API_KEY"
+    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"
   ];
   return Object.fromEntries(names.flatMap((name) => (
     typeof process.env[name] === "string" ? [[name, process.env[name]]] : []
@@ -235,10 +236,16 @@ SESSION_CODE = r'''
       // GROKBOT_MODEL_ROUTER_V45: route enabled sessions through the provider adapter.
       const grokBotRouterConfig = loadGrokBotRouterConfig();
       if (grokBotRouterConfig) {
-        const provider = grokBotRouterConfig.provider === "openrouter" ? "openrouter" : "codex";
+        const provider = ["codex", "openrouter", "claude-code", "deepseek"].includes(grokBotRouterConfig.provider)
+          ? grokBotRouterConfig.provider
+          : "codex";
         const modelId = provider === "openrouter"
           ? grokBotRouterConfig.openRouterModel || "anthropic/claude-sonnet-4.6"
-          : grokBotRouterConfig.codexModel || "gpt-5.6-sol";
+          : provider === "claude-code"
+            ? grokBotRouterConfig.claudeCodeModel || "sonnet"
+            : provider === "deepseek"
+              ? grokBotRouterConfig.deepSeekModel || "deepseek-flash"
+              : grokBotRouterConfig.codexModel || "gpt-5.6-sol";
         return {
           getExecutor: () => createGrokBotRouterPromptExecutor(grokBotRouterConfig, sessionOptions),
           getModelId: () => modelId

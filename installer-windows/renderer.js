@@ -1,8 +1,13 @@
 const elements = {
   codex: document.querySelector("#codexEnabled"),
+  claudeCode: document.querySelector("#claudeCodeEnabled"),
+  deepSeek: document.querySelector("#deepSeekEnabled"),
   openRouter: document.querySelector("#openRouterEnabled"),
   defaultProvider: document.querySelector("#defaultProvider"),
   codexModel: document.querySelector("#codexModel"),
+  claudeCodeModel: document.querySelector("#claudeCodeModel"),
+  deepSeekModel: document.querySelector("#deepSeekModel"),
+  deepSeekKey: document.querySelector("#deepSeekKey"),
   openRouterModel: document.querySelector("#openRouterModel"),
   openRouterKey: document.querySelector("#openRouterKey"),
   install: document.querySelector("#install"),
@@ -22,14 +27,19 @@ function syncProviders() {
   const previous = elements.defaultProvider.value;
   elements.defaultProvider.replaceChildren();
   if (elements.codex.checked) elements.defaultProvider.add(new Option("Codex SDK", "codex"));
+  if (elements.claudeCode.checked) elements.defaultProvider.add(new Option("Claude Code", "claude-code"));
+  if (elements.deepSeek.checked) elements.defaultProvider.add(new Option("DeepSeek", "deepseek"));
   if (elements.openRouter.checked) elements.defaultProvider.add(new Option("OpenRouter", "openrouter"));
   if ([...elements.defaultProvider.options].some((option) => option.value === previous)) {
     elements.defaultProvider.value = previous;
   }
   elements.codexModel.disabled = !elements.codex.checked || busy;
+  elements.claudeCodeModel.disabled = !elements.claudeCode.checked || busy;
+  elements.deepSeekModel.disabled = !elements.deepSeek.checked || busy;
+  elements.deepSeekKey.disabled = !elements.deepSeek.checked || busy;
   elements.openRouterModel.disabled = !elements.openRouter.checked || busy;
   elements.openRouterKey.disabled = !elements.openRouter.checked || busy;
-  elements.install.disabled = busy || (!elements.codex.checked && !elements.openRouter.checked);
+  elements.install.disabled = busy || (!elements.codex.checked && !elements.claudeCode.checked && !elements.deepSeek.checked && !elements.openRouter.checked);
 }
 
 function setBusy(value, status) {
@@ -37,6 +47,8 @@ function setBusy(value, status) {
   elements.status.textContent = status;
   elements.spinner.classList.toggle("hidden", !value);
   elements.codex.disabled = value;
+  elements.claudeCode.disabled = value;
+  elements.deepSeek.disabled = value;
   elements.openRouter.disabled = value;
   elements.defaultProvider.disabled = value;
   buttons.forEach((button) => { button.disabled = value; });
@@ -50,6 +62,10 @@ function appendLog(message) {
 
 function validOpenRouterKey(value) {
   return value.startsWith("sk-or-v1-") && value.length >= 33 && !/\s/.test(value);
+}
+
+function validDeepSeekKey(value) {
+  return value.startsWith("sk-") && value.length >= 23 && !/\s/.test(value);
 }
 
 async function run(action, payload = {}) {
@@ -73,21 +89,37 @@ async function run(action, payload = {}) {
 }
 
 elements.codex.addEventListener("change", syncProviders);
+elements.claudeCode.addEventListener("change", syncProviders);
+elements.deepSeek.addEventListener("change", syncProviders);
 elements.openRouter.addEventListener("change", syncProviders);
 elements.install.addEventListener("click", () => {
   const key = elements.openRouterKey.value.trim();
+  const deepSeekKey = elements.deepSeekKey.value.trim();
+  if (elements.deepSeek.checked && deepSeekKey && !validDeepSeekKey(deepSeekKey)) {
+    window.alert("That DeepSeek key does not look valid. Paste the complete key beginning with sk-. Nothing has been saved or installed.");
+    return;
+  }
   if (elements.openRouter.checked && key && !validOpenRouterKey(key)) {
     window.alert("That OpenRouter key does not look valid. Paste the complete key beginning with sk-or-v1-. Nothing has been saved or installed.");
     return;
   }
-  const providers = [elements.codex.checked && "codex", elements.openRouter.checked && "openrouter"].filter(Boolean);
+  const providers = [
+    elements.codex.checked && "codex",
+    elements.claudeCode.checked && "claude-code",
+    elements.deepSeek.checked && "deepseek",
+    elements.openRouter.checked && "openrouter",
+  ].filter(Boolean);
   const payload = {
     defaultProvider: elements.defaultProvider.value,
     providers,
     codexModel: elements.codexModel.value,
+    claudeCodeModel: elements.claudeCodeModel.value,
+    deepSeekModel: elements.deepSeekModel.value,
+    deepSeekKey,
     openRouterModel: elements.openRouterModel.value,
     openRouterKey: key,
   };
+  elements.deepSeekKey.value = "";
   elements.openRouterKey.value = "";
   run("install", payload);
 });

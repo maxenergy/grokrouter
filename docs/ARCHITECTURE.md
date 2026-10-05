@@ -11,7 +11,7 @@ This document is the implementation-level companion to [How it works, without th
 | Official Grok Bot | Chat UI, Bots, transcript, computer, files, browser, tool execution, permission UX and assistant delivery | Routed provider credentials or per-Bot provider selection |
 | Patched host executor | Decide stock versus routed path, sanitize the host payload, launch the router runtime and translate its result back into Grok's protocol | Provider implementation, long-term state or arbitrary tool execution |
 | Router runtime | Deterministic controls, stable Bot identity, provider/model state, replay protection, provider calls, transcript conversion and redacted audit | Grok's UI, permission decisions or the computer itself |
-| Codex SDK / OpenRouter | Model inference and provider-native thread state | Authority to invent a Grok tool that the host did not offer |
+| Codex SDK / Claude Agent SDK / DeepSeek / OpenRouter | Model inference; provider-native session state where supported | Authority to invent a Grok tool that the host did not offer |
 | Native platform installer shells | Swift/AppKit on macOS and sandboxed Electron on Windows: exact compatibility checks, loopback/noVNC transport, checksummed install, provider setup, restore and cleanup | Grok account data or an unknown host build |
 
 ## Install and update flow
@@ -40,7 +40,7 @@ The installer links only missing skill names or links already owned by the curre
 2. The small host adapter checks `provider.json`. If routing is disabled, the original inference path continues untouched.
 3. If enabled, the adapter launches the isolated Node runtime and sends sanitized JSON over stdin: config, transcript, tool schemas, and stable session identifiers.
 4. The runtime selects the provider stored for that Bot.
-5. Codex starts/resumes an SDK thread; OpenRouter sends a Chat Completions request with native function schemas.
+5. The provider dispatcher selects one adapter: Codex starts/resumes an SDK thread; Claude Code starts/resumes a Claude Agent SDK session; DeepSeek sends a stateless Responses request with reconstructed message/function-call history; OpenRouter sends a Chat Completions request for compatibility.
 6. A normal text response is wrapped in Grok's user-delivery tool. A provider tool request is returned to Grok for execution.
 7. Grok executes computer/browser/file/orchestration tools in its existing host. Their results re-enter the transcript and the same provider thread continues.
 
@@ -67,6 +67,20 @@ Printed pseudo-tool syntax is not authority. The guarded OpenRouter compatibilit
 Codex receives a JSON response schema with `text` and `toolCalls`. Grok's outer tools are described in the prompt with their JSON schemas. Codex can do native Codex work inside `/workspace` or request an outer Grok tool. The adapter never claims a tool completed until Grok returns its result in a later transcript turn.
 
 Images are written to a private temporary directory and passed as Codex `local_image` inputs. At most four images and 20 MB per image are accepted per turn.
+
+## Claude Code bridge
+
+Claude Code uses the Anthropic Claude Agent SDK rather than reducing Claude to a plain Messages API call. GrokRouter persists the SDK session id in the same per-Bot state slot used for other provider threads and passes it back through `resume` on the next turn. Claude Code keeps its native coding surface (for example Read/Edit/Bash/Web/Agent when enabled) for work inside the Bot workspace.
+
+Grok outer tools remain a separate trust boundary. Their exact schemas are described to Claude and an outer-tool request is returned in the same normalized `{ text, toolCalls }` envelope used by Codex. Grok, not Claude Code, executes those outer computer/browser/orchestration actions and applies the host permission policy. Grok reasoning controls are mapped onto Claude Agent SDK effort values (`minimal → low`, `xhigh → max`).
+
+## DeepSeek bridge
+
+DeepSeek uses the native Responses API at `/responses`. Its Responses API is treated as stateless: GrokRouter does not fabricate a provider thread id or send an unsupported `previous_response_id`. Instead it reconstructs the required controlled transcript each turn, including Responses-style `function_call` and `function_call_output` items for completed Grok tools.
+
+Only host-offered schemas become DeepSeek function tools. Explicit user requests for a named offered tool can force that exact tool for the next provider round. DeepSeek API credentials are loaded from Grok Bot Secrets (or an explicitly inherited environment variable) at request time and are excluded from state and audit output.
+
+> Development status: the Claude Code and DeepSeek adapters have automated contract coverage in this branch, but their real Grok Computer/Screenshot/sub-agent parity is not claimed until fresh-Bot live acceptance is recorded.
 
 ## OpenRouter bridge
 
